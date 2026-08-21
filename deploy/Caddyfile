@@ -1,0 +1,12 @@
+# Replace the hostname before enabling. Caddy obtains and renews HTTPS certificates.
+strength.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8000
+    header {
+        -Server
+    }
+    request_body {
+        max_size 8MB
+    }
+}
+

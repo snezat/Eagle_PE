@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Sign in · Arc Strength Athletic PE</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-brand">
+      <span class="eyebrow">Athletic PE planning</span>
+      <h1>Arc Strength</h1>
+      <p>Secure strength programming, athlete rosters, and projected-max review for your weight room.</p>
+      <div class="auth-lock">Private coach access</div>
+    </section>
+    <section class="auth-card" aria-labelledby="signin-title">
+      <h2 id="signin-title">Coach sign in</h2>
+      <p class="muted">Enter the administrator credentials created during server setup.</p>
+      {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+      <form method="post" action="{{ url_for('login') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <label>Username<input name="username" autocomplete="username" required maxlength="80" value="{{ username or '' }}"></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required maxlength="128"></label>
+        <button class="btn primary full" type="submit">Sign in</button>
+      </form>
+      <p class="privacy-note">Student information is never included in this public page.</p>
+    </section>
+  </main>
+</body>
+</html>
+

@@ -1,0 +1,26 @@
+[Unit]
+Description=Arc Strength Athletic PE
+After=network.target
+
+[Service]
+Type=simple
+User=arcstrength
+Group=arcstrength
+WorkingDirectory=/opt/arc-strength
+EnvironmentFile=/etc/arc-strength.env
+ExecStart=/opt/arc-strength/.venv/bin/gunicorn --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - wsgi:app
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arc-strength
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
+

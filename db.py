@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from security import FieldCipher
+
+
+SCHEMA = """
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS admins (
+  id INTEGER PRIMARY KEY,
+  username_lookup TEXT NOT NULL UNIQUE,
+  username_enc BLOB NOT NULL,
+  password_hash TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+CREATE TABLE IF NOT EXISTS server_sessions (
+  id_hash TEXT PRIMARY KEY,
+  admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+  csrf_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  user_agent_hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS class_groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sports (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sport_groups (
+  id INTEGER PRIMARY KEY,
+  sport_id INTEGER NOT NULL REFERENCES sports(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  UNIQUE(sport_id, name)
+);
+CREATE TABLE IF NOT EXISTS athletes (
+  id TEXT PRIMARY KEY,
+  name_enc BLOB NOT NULL,
+  name_lookup TEXT NOT NULL,
+  grade_enc BLOB,
+  teacher_enc BLOB,
+  class_group_id INTEGER REFERENCES class_groups(id),
+  subgroup_enc BLOB,
+  maxes_enc BLOB NOT NULL,
+  overrides_enc BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_athletes_name_lookup ON athletes(name_lookup);
+CREATE INDEX IF NOT EXISTS idx_athletes_class_group ON athletes(class_group_id);
+CREATE TABLE IF NOT EXISTS athlete_sports (
+  athlete_id TEXT NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+  sport_id INTEGER NOT NULL REFERENCES sports(id) ON DELETE CASCADE,
+  subgroup_enc BLOB,
+  PRIMARY KEY(athlete_id, sport_id)
+);
+CREATE INDEX IF NOT EXISTS idx_athlete_sports_sport ON athlete_sports(sport_id, athlete_id);
+CREATE TABLE IF NOT EXISTS assignments (
+  id TEXT PRIMARY KEY,
+  class_group_id INTEGER NOT NULL REFERENCES class_groups(id),
+  sport_id INTEGER REFERENCES sports(id),
+  assigned_date TEXT NOT NULL,
+  lift_enc BLOB NOT NULL,
+  percent INTEGER NOT NULL CHECK(percent BETWEEN 1 AND 100),
+  sets_count INTEGER NOT NULL CHECK(sets_count > 0),
+  reps INTEGER NOT NULL CHECK(reps > 0),
+  expected_reps INTEGER NOT NULL CHECK(expected_reps > 0),
+  notes_enc BLOB,
+  locked INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_date_group ON assignments(assigned_date, class_group_id);
+CREATE TABLE IF NOT EXISTS prescriptions (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+  athlete_id TEXT NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+  lift_enc BLOB NOT NULL,
+  projected_max REAL,
+  prescribed_load REAL,
+  sets_count INTEGER NOT NULL,
+  reps INTEGER NOT NULL,
+  expected_reps INTEGER NOT NULL,
+  completed_load REAL,
+  burnout_reps INTEGER,
+  note_enc BLOB,
+  submitted INTEGER NOT NULL DEFAULT 0,
+  load_mismatch INTEGER NOT NULL DEFAULT 0,
+  needs_review INTEGER NOT NULL DEFAULT 0,
+  is_override INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_assignment ON prescriptions(assignment_id);
+CREATE INDEX IF NOT EXISTS idx_prescriptions_athlete ON prescriptions(athlete_id);
+CREATE TABLE IF NOT EXISTS suggestions (
+  id TEXT PRIMARY KEY,
+  prescription_id TEXT NOT NULL REFERENCES prescriptions(id) ON DELETE CASCADE,
+  assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+  athlete_id TEXT NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+  lift_enc BLOB NOT NULL,
+  old_max REAL,
+  burnout_reps INTEGER,
+  expected_reps INTEGER,
+  suggested_max REAL,
+  manual_max REAL,
+  extreme INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status, assignment_id);
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key TEXT PRIMARY KEY,
+  value_enc BLOB NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_attempts (
+  lookup_hash TEXT NOT NULL,
+  attempted_at INTEGER NOT NULL,
+  succeeded INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup_time ON login_attempts(lookup_hash, attempted_at);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  admin_id INTEGER,
+  ip_hash TEXT NOT NULL,
+  detail_enc BLOB,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+"""
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Database:
+    def __init__(self, path: str | Path, cipher: FieldCipher):
+        self.path = str(path)
+        self.cipher = cipher
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=15)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.execute("PRAGMA busy_timeout = 15000")
+        return conn
+
+    @contextmanager
+    def transaction(self):
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def initialize(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as conn:
+            conn.executescript(SCHEMA)
+            conn.execute("PRAGMA optimize")
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
+
+    def admin_count(self) -> int:
+        with self.connect() as conn:
+            return int(conn.execute("SELECT count(*) FROM admins").fetchone()[0])
+
+    def audit(self, event: str, admin_id: int | None, ip_hash: str, detail: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO audit_log(event_type,admin_id,ip_hash,detail_enc,created_at) VALUES(?,?,?,?,?)",
+                (event, admin_id, ip_hash, self.cipher.encrypt(detail), utcnow()),
+            )
+
+    def get_state(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            groups = conn.execute("SELECT id,name FROM class_groups ORDER BY sort_order,name").fetchall()
+            sports = conn.execute("SELECT id,name FROM sports ORDER BY sort_order,name").fetchall()
+            group_names = {r["id"]: r["name"] for r in groups}
+            sport_names = {r["id"]: r["name"] for r in sports}
+            sport_groups = {r["name"]: [] for r in sports}
+            for row in conn.execute("SELECT sport_id,name FROM sport_groups ORDER BY name"):
+                sport_groups[sport_names[row["sport_id"]]].append(row["name"])
+
+            athlete_sports: dict[str, list[str]] = {}
+            group_by_sport: dict[str, dict[str, str]] = {}
+            for row in conn.execute("SELECT athlete_id,sport_id,subgroup_enc FROM athlete_sports"):
+                athlete_sports.setdefault(row["athlete_id"], []).append(sport_names[row["sport_id"]])
+                if row["subgroup_enc"]:
+                    group_by_sport.setdefault(row["athlete_id"], {})[sport_names[row["sport_id"]]] = self.cipher.decrypt(row["subgroup_enc"])
+            athletes = []
+            athlete_names = {}
+            for row in conn.execute("SELECT * FROM athletes ORDER BY name_lookup"):
+                name = self.cipher.decrypt(row["name_enc"])
+                athlete_names[row["id"]] = name
+                athletes.append({
+                    "id": row["id"], "name": name,
+                    "grade": self.cipher.decrypt(row["grade_enc"]) or "",
+                    "teacher": self.cipher.decrypt(row["teacher_enc"]) or "",
+                    "classGroup": group_names.get(row["class_group_id"], ""),
+                    "sports": athlete_sports.get(row["id"], []),
+                    "groupBySport": group_by_sport.get(row["id"], {}),
+                    "subgroup": self.cipher.decrypt(row["subgroup_enc"]) or "",
+                    "maxes": json.loads(self.cipher.decrypt(row["maxes_enc"]) or "{}"),
+                    "overrides": json.loads(self.cipher.decrypt(row["overrides_enc"]) or "{}"),
+                })
+            assignments = []
+            for row in conn.execute("SELECT * FROM assignments ORDER BY created_at"):
+                assignments.append({
+                    "id": row["id"], "group": group_names[row["class_group_id"]],
+                    "sport": sport_names.get(row["sport_id"], "all"), "date": row["assigned_date"],
+                    "lift": self.cipher.decrypt(row["lift_enc"]), "percent": row["percent"],
+                    "sets": row["sets_count"], "reps": row["reps"], "expected": row["expected_reps"],
+                    "notes": self.cipher.decrypt(row["notes_enc"]) or "", "locked": bool(row["locked"]),
+                    "priority": bool(row["priority"]), "createdAt": row["created_at"],
+                })
+            prescriptions = []
+            athlete_map = {a["id"]: a for a in athletes}
+            for row in conn.execute("SELECT * FROM prescriptions"):
+                athlete = athlete_map.get(row["athlete_id"], {})
+                prescriptions.append({
+                    "id": row["id"], "assignmentId": row["assignment_id"], "athleteId": row["athlete_id"],
+                    "athleteName": athlete_names.get(row["athlete_id"], ""), "group": athlete.get("classGroup", ""),
+                    "sports": athlete.get("sports", []), "lift": self.cipher.decrypt(row["lift_enc"]),
+                    "projectedMaxUsed": row["projected_max"], "prescribedLoad": row["prescribed_load"],
+                    "sets": row["sets_count"], "reps": row["reps"], "expected": row["expected_reps"],
+                    "completedLoad": row["completed_load"] if row["completed_load"] is not None else "",
+                    "burnoutReps": row["burnout_reps"] if row["burnout_reps"] is not None else "",
+                    "note": self.cipher.decrypt(row["note_enc"]) or "", "submitted": bool(row["submitted"]),
+                    "loadMismatch": bool(row["load_mismatch"]), "needsReview": bool(row["needs_review"]),
+                    "isIndividualOverride": bool(row["is_override"]),
+                })
+            suggestions = []
+            for row in conn.execute("SELECT * FROM suggestions"):
+                athlete = athlete_map.get(row["athlete_id"], {})
+                suggestions.append({
+                    "id": row["id"], "prescriptionId": row["prescription_id"], "assignmentId": row["assignment_id"],
+                    "athleteId": row["athlete_id"], "athleteName": athlete_names.get(row["athlete_id"], ""),
+                    "group": athlete.get("classGroup", ""), "sports": athlete.get("sports", []),
+                    "lift": self.cipher.decrypt(row["lift_enc"]), "oldMax": row["old_max"],
+                    "burnoutReps": row["burnout_reps"], "expected": row["expected_reps"],
+                    "suggestedMax": row["suggested_max"], "manualMax": row["manual_max"],
+                    "extreme": bool(row["extreme"]), "status": row["status"],
+                })
+            settings = {}
+            for row in conn.execute("SELECT setting_key,value_enc FROM app_settings"):
+                settings[row["setting_key"]] = json.loads(self.cipher.decrypt(row["value_enc"]) or "null")
+            return {
+                "sports": [r["name"] for r in sports], "sportGroups": sport_groups,
+                "classGroups": [r["name"] for r in groups], "athletes": athletes,
+                "assignments": assignments, "prescriptions": prescriptions, "suggestions": suggestions,
+                "liftLibrary": settings.get("liftLibrary", ["Bench", "Back Squat", "Power Clean", "Deadlift"]),
+            }
+
+    def replace_state(self, state: dict[str, Any]) -> None:
+        _validate_state(state)
+        now = utcnow()
+        with self.transaction() as conn:
+            for table in ("suggestions", "prescriptions", "assignments", "athlete_sports", "athletes", "sport_groups", "sports", "class_groups"):
+                conn.execute(f"DELETE FROM {table}")
+            groups = list(dict.fromkeys(str(x).strip() for x in state.get("classGroups", []) if str(x).strip()))
+            sports = list(dict.fromkeys(str(x).strip() for x in state.get("sports", []) if str(x).strip()))
+            for i, name in enumerate(groups):
+                conn.execute("INSERT INTO class_groups(name,sort_order) VALUES(?,?)", (name, i))
+            for i, name in enumerate(sports):
+                conn.execute("INSERT INTO sports(name,sort_order) VALUES(?,?)", (name, i))
+            group_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id,name FROM class_groups")}
+            sport_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id,name FROM sports")}
+            for sport, names in state.get("sportGroups", {}).items():
+                if sport not in sport_ids:
+                    continue
+                for name in dict.fromkeys(str(x).strip() for x in names if str(x).strip()):
+                    conn.execute("INSERT OR IGNORE INTO sport_groups(sport_id,name) VALUES(?,?)", (sport_ids[sport], name))
+            athletes = state.get("athletes", [])
+            name_to_id = {}
+            for i, athlete in enumerate(athletes):
+                athlete_id = str(athlete.get("id") or f"athlete-{i+1}")[:80]
+                name = str(athlete.get("name", "")).strip()
+                if not name:
+                    continue
+                name_to_id[name] = athlete_id
+                conn.execute("""INSERT INTO athletes(id,name_enc,name_lookup,grade_enc,teacher_enc,class_group_id,subgroup_enc,maxes_enc,overrides_enc,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (
+                    athlete_id, self.cipher.encrypt(name), self.cipher.lookup(name), self.cipher.encrypt(athlete.get("grade", "")),
+                    self.cipher.encrypt(athlete.get("teacher", "")), group_ids.get(athlete.get("classGroup")),
+                    self.cipher.encrypt(athlete.get("subgroup", "")), self.cipher.encrypt(json.dumps(athlete.get("maxes", {}), separators=(",", ":"))),
+                    self.cipher.encrypt(json.dumps(athlete.get("overrides", {}), separators=(",", ":"))), now, now,
+                ))
+                group_by_sport = athlete.get("groupBySport", {})
+                for sport in athlete.get("sports", []):
+                    if sport in sport_ids:
+                        conn.execute("INSERT INTO athlete_sports(athlete_id,sport_id,subgroup_enc) VALUES(?,?,?)", (
+                            athlete_id, sport_ids[sport], self.cipher.encrypt(group_by_sport.get(sport, ""))
+                        ))
+            assignment_ids = set()
+            for a in state.get("assignments", []):
+                if a.get("group") not in group_ids:
+                    continue
+                aid = str(a.get("id", ""))[:100]
+                if not aid:
+                    continue
+                assignment_ids.add(aid)
+                conn.execute("""INSERT INTO assignments(id,class_group_id,sport_id,assigned_date,lift_enc,percent,sets_count,reps,expected_reps,notes_enc,locked,priority,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    aid, group_ids[a["group"]], sport_ids.get(a.get("sport")), a.get("date"), self.cipher.encrypt(a.get("lift", "")),
+                    int(a.get("percent", 1)), int(a.get("sets", 1)), int(a.get("reps", 1)), int(a.get("expected", 1)),
+                    self.cipher.encrypt(a.get("notes", "")), int(bool(a.get("locked"))), int(bool(a.get("priority"))), int(a.get("createdAt") or 0),
+                ))
+            prescription_ids = set()
+            for p in state.get("prescriptions", []):
+                athlete_id = p.get("athleteId") or name_to_id.get(p.get("athleteName"))
+                if p.get("assignmentId") not in assignment_ids or athlete_id not in {a["id"] for a in athletes if a.get("id")} | set(name_to_id.values()):
+                    continue
+                pid = str(p.get("id", ""))[:100]
+                if not pid:
+                    continue
+                prescription_ids.add(pid)
+                conn.execute("""INSERT INTO prescriptions(id,assignment_id,athlete_id,lift_enc,projected_max,prescribed_load,sets_count,reps,expected_reps,completed_load,burnout_reps,note_enc,submitted,load_mismatch,needs_review,is_override)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    pid, p["assignmentId"], athlete_id, self.cipher.encrypt(p.get("lift", "")), _number(p.get("projectedMaxUsed")),
+                    _number(p.get("prescribedLoad")), int(p.get("sets", 1)), int(p.get("reps", 1)), int(p.get("expected", 1)),
+                    _number(p.get("completedLoad")), _integer(p.get("burnoutReps")), self.cipher.encrypt(p.get("note", "")),
+                    int(bool(p.get("submitted"))), int(bool(p.get("loadMismatch"))), int(bool(p.get("needsReview"))), int(bool(p.get("isIndividualOverride"))),
+                ))
+            for s in state.get("suggestions", []):
+                athlete_id = s.get("athleteId") or name_to_id.get(s.get("athleteName"))
+                if s.get("prescriptionId") not in prescription_ids or s.get("assignmentId") not in assignment_ids or not athlete_id:
+                    continue
+                conn.execute("""INSERT INTO suggestions(id,prescription_id,assignment_id,athlete_id,lift_enc,old_max,burnout_reps,expected_reps,suggested_max,manual_max,extreme,status)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    str(s.get("id"))[:100], s["prescriptionId"], s["assignmentId"], athlete_id, self.cipher.encrypt(s.get("lift", "")),
+                    _number(s.get("oldMax")), _integer(s.get("burnoutReps")), _integer(s.get("expected")), _number(s.get("suggestedMax")),
+                    _number(s.get("manualMax")), int(bool(s.get("extreme"))), str(s.get("status", "pending"))[:20],
+                ))
+            conn.execute("DELETE FROM app_settings WHERE setting_key='liftLibrary'")
+            conn.execute("INSERT INTO app_settings(setting_key,value_enc,updated_at) VALUES(?,?,?)", (
+                "liftLibrary", self.cipher.encrypt(json.dumps(state.get("liftLibrary", []), separators=(",", ":"))), now
+            ))
+
+
+def _number(value):
+    return None if value in (None, "") else float(value)
+
+
+def _integer(value):
+    return None if value in (None, "") else int(value)
+
+
+def _validate_state(state: dict[str, Any]) -> None:
+    if not isinstance(state, dict):
+        raise ValueError("State must be an object")
+    limits = {"athletes": 2000, "assignments": 20000, "prescriptions": 100000, "suggestions": 100000, "sports": 100, "classGroups": 50}
+    for key, limit in limits.items():
+        value = state.get(key, [])
+        if not isinstance(value, list) or len(value) > limit:
+            raise ValueError(f"Invalid {key}")
+    for athlete in state.get("athletes", []):
+        if not isinstance(athlete, dict) or len(str(athlete.get("name", ""))) > 200:
+            raise ValueError("Invalid athlete")
+    for assignment in state.get("assignments", []):
+        if not isinstance(assignment, dict) or len(str(assignment.get("lift", ""))) > 200 or len(str(assignment.get("notes", ""))) > 2000:
+            raise ValueError("Invalid assignment")
