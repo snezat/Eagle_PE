@@ -114,13 +114,15 @@ python="$venv/bin/python"
 pip="$venv/bin/pip"
 requirements="$script_dir/requirements.txt"
 stamp="$venv/.requirements.sha256"
-if command -v sha256sum >/dev/null 2>&1; then
-    requirements_hash=$(sha256sum "$requirements" | awk '{print $1}')
-else
-    requirements_hash=$($python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$requirements")
-fi
+[ -f "$requirements" ] || {
+    echo "Arc Strength startup failed: $requirements is missing." >&2
+    exit 1
+}
+requirements_hash=$($python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$requirements")
 installed_hash=""
-[ -f "$stamp" ] && installed_hash=$(sed -n '1p' "$stamp")
+if [ -f "$stamp" ]; then
+    IFS= read -r installed_hash < "$stamp" || installed_hash=""
+fi
 
 if [ "$requirements_hash" != "$installed_hash" ] || ! "$python" -c 'import flask, cryptography, gunicorn' >/dev/null 2>&1; then
     echo "Installing required server dependencies…"

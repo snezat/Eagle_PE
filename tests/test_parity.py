@@ -50,11 +50,16 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     assert "sqlite3" in installer and ".backup" in installer
     assert 'sh "$app_target/start.sh" "$setup_argument"' in installer
     assert "base package installation failed" in installer
+    assert "templates/login.html" in installer
     assert "chown -R arcstrength:arcstrength" in installer
     assert 'chown -R root:root "$app_target"' in installer
     assert 'chown -R arcstrength:arcstrength "$ARC_INSTANCE_PATH" "$venv"' not in start
     assert 'chown -R root:root "$venv"' in start
     assert "systemctl is-active --quiet arc-strength" in installer
+    assert "probe_application" in installer
+    assert "PRAGMA quick_check" in installer
+    assert 'cp "$app_target/.env.example"' not in installer
+    assert "ARC_TRUSTED_HOSTS=strength.example.com" in installer
     assert "\ninstall " not in installer
     assert "\ninstall " not in backup
     assert "sqlite3" in backup and ".backup" in backup

@@ -23,8 +23,26 @@ require_command systemctl
 
 app_source="${1:-$(pwd)}"
 app_source=$(CDPATH='' cd -- "$app_source" 2>/dev/null && pwd) || fail "cannot access source directory: $app_source"
-[ -f "$app_source/wsgi.py" ] || fail "$app_source does not contain wsgi.py; copy the complete arc-strength-webapp directory"
-[ -f "$app_source/requirements.txt" ] || fail "$app_source does not contain requirements.txt; copy the complete arc-strength-webapp directory"
+for required_file in \
+  app.py \
+  db.py \
+  security.py \
+  start.sh \
+  wsgi.py \
+  requirements.txt \
+  deploy/arc-strength.service \
+  deploy/install-lxc.sh \
+  templates/app.html \
+  templates/error.html \
+  templates/login.html \
+  templates/setup.html \
+  static/css/app.css \
+  static/js/app.js \
+  static/img/athletic-eagle-logo.png
+do
+  [ -f "$app_source/$required_file" ] || \
+    fail "$app_source is missing $required_file; copy the complete arc-strength-webapp directory"
+done
 
 if [ -r /etc/os-release ]; then
   # shellcheck disable=SC1091
@@ -43,7 +61,7 @@ apt-get install -y --no-install-recommends \
   python3 python3-pip python3-venv rsync sqlite3 util-linux \
   || fail "base package installation failed"
 
-for command_name in chmod chown cp find id mkdir mktemp python3 rsync runuser sqlite3 useradd; do
+for command_name in chmod chown cp find id mkdir mktemp mv python3 rsync runuser sqlite3 useradd; do
   require_command "$command_name"
 done
 
@@ -123,17 +141,24 @@ if [ -f "$source_database" ] && [ ! -f "$target_database" ]; then
       fail "refusing to migrate the database without $required_key; encrypted data would be unreadable"
   done
 
-  sqlite3 "$source_database" ".timeout 15000" ".backup '$target_database'" \
-    || fail "the encrypted SQLite database could not be migrated"
+  # Put the key set in place before publishing the database. If power or copying
+  # fails midway, no database can be mistaken for a complete migration.
   for data_file in master.key old-master.keys lookup.key flask-secret.key setup-token; do
     if [ -f "$app_source/instance/$data_file" ]; then
-      cp "$app_source/instance/$data_file" "$data_target/$data_file"
-      chown arcstrength:arcstrength "$data_target/$data_file"
-      chmod 0600 "$data_target/$data_file"
+      staged_file="$data_target/.$data_file.migrate.$$"
+      cp "$app_source/instance/$data_file" "$staged_file" \
+        || fail "could not stage $data_file for encrypted database migration"
+      chown arcstrength:arcstrength "$staged_file"
+      chmod 0600 "$staged_file"
+      mv "$staged_file" "$data_target/$data_file"
     fi
   done
-  chown arcstrength:arcstrength "$target_database"
-  chmod 0600 "$target_database"
+  staged_database="$data_target/.arc-strength.sqlite3.migrate.$$"
+  sqlite3 "$source_database" ".timeout 15000" ".backup '$staged_database'" \
+    || fail "the encrypted SQLite database could not be migrated"
+  chown arcstrength:arcstrength "$staged_database"
+  chmod 0600 "$staged_database"
+  mv "$staged_database" "$target_database"
 fi
 
 if [ -f "$target_database" ]; then
@@ -152,6 +177,10 @@ fi
   || fail "Python dependency installation failed"
 "$app_target/.venv/bin/python" -c 'import cryptography, flask, gunicorn' \
   || fail "installed Python dependencies could not be imported"
+requirements_hash=$("$app_target/.venv/bin/python" -c \
+  'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' \
+  "$app_target/requirements.txt")
+printf '%s\n' "$requirements_hash" > "$app_target/.venv/.requirements.sha256"
 
 # Application code and dependencies remain root-owned so a compromised web
 # worker cannot replace code that root may execute on a later maintenance run.
@@ -165,7 +194,24 @@ cp "$app_target/deploy/arc-strength.service" "$service_target"
 chown root:root "$service_target"
 chmod 0644 "$service_target"
 if [ ! -f "$env_target" ]; then
-  cp "$app_target/.env.example" "$env_target"
+  # Generate this directly so a fresh deployment still works when a copy made
+  # with '*' omitted hidden files such as .env.example.
+  env_staging="$env_target.new.$$"
+  {
+    printf '%s\n' \
+      '# Arc Strength production settings. Replace the example hostname before network use.' \
+      'ARC_ENV=production' \
+      'ARC_INSTANCE_PATH=/var/lib/arc-strength' \
+      'ARC_DATABASE_PATH=/var/lib/arc-strength/arc-strength.sqlite3' \
+      'ARC_TRUSTED_HOSTS=strength.example.com' \
+      'ARC_SECURE_COOKIES=1' \
+      'ARC_PROXY_COUNT=1' \
+      'ARC_SESSION_HOURS=12' \
+      'ARC_WORKERS=2' \
+      'ARC_THREADS=4' \
+      'LISTEN_ADDRESS=127.0.0.1:8000'
+  } > "$env_staging" || fail "could not create the default server environment file"
+  mv "$env_staging" "$env_target"
   chown root:root "$env_target"
   chmod 0600 "$env_target"
 fi
@@ -199,10 +245,32 @@ systemctl daemon-reload || fail "systemd could not reload the Arc Strength unit"
 systemctl enable arc-strength || fail "the Arc Strength service could not be enabled"
 systemctl restart arc-strength || fail "the Arc Strength service could not be started"
 
+probe_application() {
+  (
+    # The environment file is root-owned and is also consumed by systemd.
+    # shellcheck disable=SC1090
+    . "$env_target"
+    health_address="${LISTEN_ADDRESS:-127.0.0.1:8000}"
+    health_port="${health_address##*:}"
+    case "$health_port" in
+      ""|*[!0-9]*) exit 1 ;;
+    esac
+    health_host="${ARC_TRUSTED_HOSTS:-localhost}"
+    health_host="${health_host%%,*}"
+    [ -n "$health_host" ] || health_host=localhost
+    case "$health_host" in
+      \*.*) health_host="health${health_host#\*}" ;;
+    esac
+    curl --fail --silent --show-error --max-time 2 \
+      --header "Host: $health_host" "http://127.0.0.1:$health_port/" \
+      >/dev/null 2>&1
+  )
+}
+
 service_ready=0
 attempt=0
-while [ "$attempt" -lt 10 ]; do
-  if systemctl is-active --quiet arc-strength; then
+while [ "$attempt" -lt 20 ]; do
+  if systemctl is-active --quiet arc-strength && probe_application; then
     service_ready=1
     break
   fi
@@ -214,8 +282,17 @@ if [ "$service_ready" -ne 1 ]; then
   fail "the Arc Strength service did not become active"
 fi
 
+for required_key in master.key lookup.key flask-secret.key; do
+  [ -f "$data_target/$required_key" ] || \
+    fail "the service started without creating $data_target/$required_key"
+done
+[ -f "$target_database" ] || fail "the service started without creating $target_database"
+database_check=$(sqlite3 "$target_database" "PRAGMA quick_check;") \
+  || fail "SQLite could not validate the installed database"
+[ "$database_check" = "ok" ] || fail "SQLite integrity check failed: $database_check"
+
 echo "Arc Strength is installed for Ubuntu/Debian LXC operation."
-echo "The application service is active on 127.0.0.1:8000."
+echo "The application service is active and returned a valid HTTP response."
 echo "Configure $env_target and Caddy before exposing it outside a trusted LAN."
 if [ -f "$data_target/setup-token" ]; then
   echo "Automated install detected. Read the one-time administrator token with:"
