@@ -57,48 +57,13 @@ echo "Installing Arc Strength system prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update || fail "apt-get update failed; verify the CT has DNS and internet access"
 apt-get install -y --no-install-recommends \
-  ca-certificates coreutils curl findutils gnupg passwd \
+  ca-certificates coreutils curl findutils hostname passwd \
   python3 python3-pip python3-venv rsync sqlite3 util-linux \
   || fail "base package installation failed"
 
-for command_name in chmod chown cp find id mkdir mktemp mv python3 rsync runuser sqlite3 useradd; do
+for command_name in chmod chown cp find hostname id mkdir mktemp mv python3 rsync runuser sqlite3 useradd; do
   require_command "$command_name"
 done
-
-install_caddy() {
-  if apt-get install -y --no-install-recommends caddy; then
-    return 0
-  fi
-
-  echo "Caddy is not available from the configured OS repositories; adding Caddy's official repository..."
-  apt-get install -y --no-install-recommends apt-transport-https debian-archive-keyring debian-keyring \
-    || fail "packages required for the official Caddy repository could not be installed"
-
-  key_tmp=$(mktemp)
-  list_tmp=$(mktemp)
-  trap 'rm -f "$key_tmp" "$list_tmp"' EXIT HUP INT TERM
-  curl --proto '=https' --tlsv1.2 -fsSL \
-    https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o "$key_tmp" \
-    || fail "could not download the official Caddy repository key"
-  curl --proto '=https' --tlsv1.2 -fsSL \
-    https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o "$list_tmp" \
-    || fail "could not download the official Caddy repository configuration"
-
-  mkdir -p /usr/share/keyrings /etc/apt/sources.list.d
-  gpg --batch --yes --dearmor \
-    --output /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$key_tmp" \
-    || fail "could not install the Caddy repository key"
-  cp "$list_tmp" /etc/apt/sources.list.d/caddy-stable.list
-  chmod 0644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
-  rm -f "$key_tmp" "$list_tmp"
-  trap - EXIT HUP INT TERM
-
-  apt-get update || fail "apt-get update failed after adding the official Caddy repository"
-  apt-get install -y --no-install-recommends caddy || fail "Caddy installation failed"
-}
-
-command -v caddy >/dev/null 2>&1 || install_caddy
-require_command caddy
 
 app_target=/opt/arc-strength
 data_target=/var/lib/arc-strength
@@ -193,28 +158,93 @@ chmod 0755 "$app_target/start.sh" "$app_target/deploy/install-lxc.sh"
 cp "$app_target/deploy/arc-strength.service" "$service_target"
 chown root:root "$service_target"
 chmod 0644 "$service_target"
-if [ ! -f "$env_target" ]; then
-  # Generate this directly so a fresh deployment still works when a copy made
-  # with '*' omitted hidden files such as .env.example.
-  env_staging="$env_target.new.$$"
-  {
-    printf '%s\n' \
-      '# Arc Strength production settings. Replace the example hostname before network use.' \
-      'ARC_ENV=production' \
-      'ARC_INSTANCE_PATH=/var/lib/arc-strength' \
-      'ARC_DATABASE_PATH=/var/lib/arc-strength/arc-strength.sqlite3' \
-      'ARC_TRUSTED_HOSTS=strength.example.com' \
-      'ARC_SECURE_COOKIES=1' \
-      'ARC_PROXY_COUNT=1' \
-      'ARC_SESSION_HOURS=12' \
-      'ARC_WORKERS=2' \
-      'ARC_THREADS=4' \
-      'LISTEN_ADDRESS=127.0.0.1:8000'
-  } > "$env_staging" || fail "could not create the default server environment file"
-  mv "$env_staging" "$env_target"
-  chown root:root "$env_target"
-  chmod 0600 "$env_target"
-fi
+
+lan_trusted_hosts=localhost,127.0.0.1
+lan_display_host=""
+for host_candidate in "$(hostname 2>/dev/null || true)" "$(hostname -f 2>/dev/null || true)" $(hostname -I 2>/dev/null || true); do
+  case "$host_candidate" in
+    ""|*[!A-Za-z0-9._:-]*) continue ;;
+  esac
+  case ",$lan_trusted_hosts," in
+    *",$host_candidate,"*) ;;
+    *) lan_trusted_hosts="$lan_trusted_hosts,$host_candidate" ;;
+  esac
+  if [ -z "$lan_display_host" ]; then
+    case "$host_candidate" in
+      *.*) lan_display_host="$host_candidate" ;;
+    esac
+  fi
+done
+[ -n "$lan_display_host" ] || lan_display_host=$(hostname 2>/dev/null || printf 'localhost')
+
+# Create or migrate the root-owned service environment atomically. Network keys
+# are intentionally switched to direct trusted-LAN mode on update; unrelated
+# administrator settings remain unchanged. This also works when .env.example was
+# omitted by a wildcard copy.
+"$app_target/.venv/bin/python" - "$env_target" "$lan_trusted_hosts" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+detected_hosts = [item for item in sys.argv[2].split(",") if item]
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else [
+    "# Arc Strength settings for direct access on a trusted local network."
+]
+
+existing = {}
+for line in lines:
+    if line.lstrip().startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    existing[key.strip()] = value.strip().strip("'\"")
+
+hosts = []
+for candidate in existing.get("ARC_TRUSTED_HOSTS", "").split(",") + detected_hosts:
+    candidate = candidate.strip()
+    if candidate and candidate not in {"*", "strength.example.com"} and candidate not in hosts:
+        hosts.append(candidate)
+
+forced = {
+    "ARC_TRUSTED_HOSTS": ",".join(hosts),
+    "ARC_SECURE_COOKIES": "0",
+    "ARC_PROXY_COUNT": "0",
+    "LISTEN_ADDRESS": "0.0.0.0:8000",
+}
+defaults = {
+    "ARC_ENV": "production",
+    "ARC_INSTANCE_PATH": "/var/lib/arc-strength",
+    "ARC_DATABASE_PATH": "/var/lib/arc-strength/arc-strength.sqlite3",
+    "ARC_SESSION_HOURS": "12",
+    "ARC_WORKERS": "2",
+    "ARC_THREADS": "4",
+}
+
+written = set()
+updated = []
+for line in lines:
+    if line.lstrip().startswith("#") or "=" not in line:
+        updated.append(line)
+        continue
+    key = line.split("=", 1)[0].strip()
+    if key in forced:
+        updated.append(f"{key}={forced[key]}")
+        written.add(key)
+    else:
+        updated.append(line)
+        if key in defaults:
+            written.add(key)
+for key, value in {**defaults, **forced}.items():
+    if key not in written:
+        updated.append(f"{key}={value}")
+
+staged = path.with_name(f"{path.name}.new.{os.getpid()}")
+staged.write_text("\n".join(updated).rstrip() + "\n", encoding="utf-8")
+os.chmod(staged, 0o600)
+os.replace(staged, path)
+PY
+chown root:root "$env_target"
+chmod 0600 "$env_target"
 
 # Interactive installs create the first administrator in the terminal. Automated
 # installs retain the one-time web token flow. A reset never touches athlete or
@@ -227,9 +257,9 @@ if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
   ARC_ENV=production \
   ARC_INSTANCE_PATH="$data_target" \
   ARC_DATABASE_PATH="$target_database" \
-  ARC_TRUSTED_HOSTS=localhost,127.0.0.1 \
-  ARC_SECURE_COOKIES=1 \
-  ARC_PROXY_COUNT=1 \
+  ARC_TRUSTED_HOSTS="$lan_trusted_hosts" \
+  ARC_SECURE_COOKIES=0 \
+  ARC_PROXY_COUNT=0 \
   sh "$app_target/start.sh" "$setup_argument"
 elif [ "$setup_argument" = "--reset-admin" ]; then
   fail "administrator reset requires an interactive terminal"
@@ -250,7 +280,7 @@ probe_application() {
     # The environment file is root-owned and is also consumed by systemd.
     # shellcheck disable=SC1090
     . "$env_target"
-    health_address="${LISTEN_ADDRESS:-127.0.0.1:8000}"
+    health_address="${LISTEN_ADDRESS:-0.0.0.0:8000}"
     health_port="${health_address##*:}"
     case "$health_port" in
       ""|*[!0-9]*) exit 1 ;;
@@ -293,7 +323,8 @@ database_check=$(sqlite3 "$target_database" "PRAGMA quick_check;") \
 
 echo "Arc Strength is installed for Ubuntu/Debian LXC operation."
 echo "The application service is active and returned a valid HTTP response."
-echo "Configure $env_target and Caddy before exposing it outside a trusted LAN."
+echo "Open Arc Strength from the trusted local network at: http://$lan_display_host:8000"
+echo "Do not expose port 8000 to the public internet."
 if [ -f "$data_target/setup-token" ]; then
   echo "Automated install detected. Read the one-time administrator token with:"
   echo "  journalctl -u arc-strength -n 40 --no-pager"

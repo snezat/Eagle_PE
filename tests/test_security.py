@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app import create_app
+from app import _validate_credentials, create_app
 from security import FieldCipher
 
 
@@ -14,6 +14,11 @@ def test_legacy_unpadded_fernet_tokens(tmp_path):
     cipher = FieldCipher(tmp_path)
     token = cipher.encrypt('{"Bench":150}')
     assert cipher.decrypt(token.rstrip(b"=")) == '{"Bench":150}'
+
+
+def test_eight_character_password_policy():
+    assert _validate_credentials("coach", "12345678", "12345678") is None
+    assert "at least 8" in _validate_credentials("coach", "1234567", "1234567")
 
 
 def test_production_configuration_fails_closed(tmp_path, monkeypatch):

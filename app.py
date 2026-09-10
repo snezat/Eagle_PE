@@ -299,8 +299,8 @@ def _start_session(db: Database, cipher: FieldCipher, admin_id: int) -> None:
 def _validate_credentials(username: str, password: str, confirm: str) -> str | None:
     if not (3 <= len(username) <= 80):
         return "Username must be 3–80 characters."
-    if len(password) < 15:
-        return "Use a password or passphrase at least 15 characters long."
+    if len(password) < 8:
+        return "Use a password or passphrase at least 8 characters long."
     if len(password) > 128:
         return "Password must be 128 characters or fewer."
     if password != confirm:

@@ -65,11 +65,11 @@ elif [ -f "$script_dir/.env" ]; then
     set +a
 fi
 
-# Gunicorn stays on loopback by default. Put Caddy/Nginx in front for network or
-# internet access; explicitly override this only for an isolated trusted LAN.
+# Gunicorn listens on the local network by default so the app is reachable at the
+# CT's IP address on port 8000. Do not forward this port to the public internet.
 # These defaults are evaluated after .env is loaded so ARC_WORKERS/ARC_THREADS
 # from that file take effect.
-LISTEN_ADDRESS="${LISTEN_ADDRESS:-127.0.0.1:8000}"
+LISTEN_ADDRESS="${LISTEN_ADDRESS:-0.0.0.0:8000}"
 WORKERS="${ARC_WORKERS:-2}"
 THREADS="${ARC_THREADS:-4}"
 
@@ -219,10 +219,10 @@ if not admin_exists or reset_requested:
             break
         write_terminal("Username must be 3–80 characters.\n")
     while True:
-        password = read_secret("Passphrase (at least 15 characters): ")
+        password = read_secret("Passphrase (at least 8 characters): ")
         confirmation = read_secret("Confirm passphrase: ")
-        if len(password) < 15:
-            write_terminal("Passphrase must be at least 15 characters.\n")
+        if len(password) < 8:
+            write_terminal("Passphrase must be at least 8 characters.\n")
         elif len(password) > 128:
             write_terminal("Passphrase must be 128 characters or fewer.\n")
         elif not secrets.compare_digest(password, confirmation):

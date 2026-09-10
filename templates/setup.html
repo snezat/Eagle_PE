@@ -17,18 +17,17 @@
     </section>
     <section class="auth-card" aria-labelledby="setup-title">
       <h2 id="setup-title">Create administrator</h2>
-      <p class="muted">Use a unique passphrase of at least 15 characters.</p>
+      <p class="muted">Use a unique password or passphrase of at least 8 characters.</p>
       {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
       <form method="post" action="{{ url_for('setup') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf }}">
         <label>One-time setup token<input name="setup_token" type="password" autocomplete="off" required></label>
         <label>Administrator username<input name="username" autocomplete="username" required maxlength="80" value="{{ username or '' }}"></label>
-        <label>Passphrase<input name="password" type="password" autocomplete="new-password" required minlength="15" maxlength="128"></label>
-        <label>Confirm passphrase<input name="confirm_password" type="password" autocomplete="new-password" required minlength="15" maxlength="128"></label>
+        <label>Passphrase<input name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+        <label>Confirm passphrase<input name="confirm_password" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
         <button class="btn primary full" type="submit">Create account</button>
       </form>
     </section>
   </main>
 </body>
 </html>
-

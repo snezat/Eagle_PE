@@ -21,6 +21,8 @@ def test_server_ui_keeps_standalone_feature_parity():
         assert feature in script
     for style in ("athletic-eagle-logo.png", ".attendance-grid", ".tv-grid.single", ".subgroup-editor"):
         assert style in styles
+    assert 'minlength="8"' in (ROOT / "templates" / "setup.html").read_text(encoding="utf-8")
+    assert 'minlength="15"' not in (ROOT / "templates" / "setup.html").read_text(encoding="utf-8")
 
 
 def test_public_assets_do_not_embed_roster_seed():
@@ -44,6 +46,8 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     assert "getpass.getpass" not in start
     assert 'os.open("/dev/tty", os.O_RDWR' in start
     assert 'open("/dev/tty", "r+")' not in start
+    assert 'LISTEN_ADDRESS="${LISTEN_ADDRESS:-0.0.0.0:8000}"' in start
+    assert "Passphrase (at least 8 characters)" in start
     assert start.index('. "$script_dir/.env"') < start.index('WORKERS="${ARC_WORKERS:-2}"')
     assert "Refusing to run Gunicorn as root" in start
     assert 'sh "$installer" "$script_dir"' in start
@@ -61,7 +65,9 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     assert "probe_application" in installer
     assert "PRAGMA quick_check" in installer
     assert 'cp "$app_target/.env.example"' not in installer
-    assert "ARC_TRUSTED_HOSTS=strength.example.com" in installer
+    assert '"LISTEN_ADDRESS": "0.0.0.0:8000"' in installer
+    assert '"ARC_SECURE_COOKIES": "0"' in installer
+    assert "lan_trusted_hosts" in installer
     assert "\ninstall " not in installer
     assert "\ninstall " not in backup
     assert "sqlite3" in backup and ".backup" in backup
@@ -76,3 +82,29 @@ def test_embedded_terminal_setup_python_compiles():
     marker = '"$python" - <<\'PY\'\n'
     setup_program = start.split(marker, 1)[1].split("\nPY\n", 1)[0]
     compile(setup_program, "start.sh terminal setup", "exec")
+
+
+def test_embedded_lan_environment_migration(tmp_path, monkeypatch):
+    installer = (ROOT / "deploy" / "install-lxc.sh").read_text(encoding="utf-8")
+    marker = '"$app_target/.venv/bin/python" - "$env_target" "$lan_trusted_hosts" <<\'PY\'\n'
+    updater = installer.split(marker, 1)[1].split("\nPY\n", 1)[0]
+    compile(updater, "install-lxc.sh environment updater", "exec")
+
+    environment = tmp_path / "arc-strength.env"
+    environment.write_text(
+        "ARC_ENV=production\n"
+        "ARC_TRUSTED_HOSTS=strength.example.com\n"
+        "ARC_SECURE_COOKIES=1\n"
+        "ARC_PROXY_COUNT=1\n"
+        "ARC_WORKERS=5\n"
+        "LISTEN_ADDRESS=127.0.0.1:8000\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.argv", ["env-updater", str(environment), "localhost,127.0.0.1,10.20.30.40,pe-app"])
+    exec(compile(updater, "install-lxc.sh environment updater", "exec"), {})
+    migrated = environment.read_text(encoding="utf-8")
+    assert "ARC_TRUSTED_HOSTS=localhost,127.0.0.1,10.20.30.40,pe-app" in migrated
+    assert "ARC_SECURE_COOKIES=0" in migrated
+    assert "ARC_PROXY_COUNT=0" in migrated
+    assert "LISTEN_ADDRESS=0.0.0.0:8000" in migrated
+    assert "ARC_WORKERS=5" in migrated
