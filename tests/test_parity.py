@@ -42,6 +42,8 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     service = (ROOT / "deploy" / "arc-strength.service").read_text(encoding="utf-8")
     assert "termios.tcgetattr" in start
     assert "getpass.getpass" not in start
+    assert 'os.open("/dev/tty", os.O_RDWR' in start
+    assert 'open("/dev/tty", "r+")' not in start
     assert start.index('. "$script_dir/.env"') < start.index('WORKERS="${ARC_WORKERS:-2}"')
     assert "Refusing to run Gunicorn as root" in start
     assert 'sh "$installer" "$script_dir"' in start
@@ -67,3 +69,10 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     assert "User=arcstrength" in service
     assert "NoNewPrivileges=true" in service
     assert (ROOT / ".env.example").is_file()
+
+
+def test_embedded_terminal_setup_python_compiles():
+    start = (ROOT / "start.sh").read_text(encoding="utf-8")
+    marker = '"$python" - <<\'PY\'\n'
+    setup_program = start.split(marker, 1)[1].split("\nPY\n", 1)[0]
+    compile(setup_program, "start.sh terminal setup", "exec")

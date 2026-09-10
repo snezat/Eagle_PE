@@ -160,7 +160,6 @@ export ARC_TERMINAL_SETUP=1
 "$python" - <<'PY'
 import os
 import secrets
-import sys
 import termios
 from pathlib import Path
 
@@ -177,52 +176,57 @@ admin_exists = db.admin_count() > 0
 
 if not admin_exists or reset_requested:
     try:
-        tty = open("/dev/tty", "r+", encoding="utf-8", buffering=1)
+        tty_fd = os.open("/dev/tty", os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
     except OSError as exc:
         raise SystemExit("An interactive terminal is required to create or reset administrator credentials.") from exc
 
-    def read_line(prompt: str) -> str:
-        tty.write(prompt)
-        tty.flush()
-        value = tty.readline()
-        if value == "":
+    def write_terminal(value: str) -> None:
+        data = value.encode("utf-8")
+        while data:
+            written = os.write(tty_fd, data)
+            if written <= 0:
+                raise SystemExit("Administrator setup was cancelled because the terminal closed.")
+            data = data[written:]
+
+    def read_terminal_line() -> str:
+        value = os.read(tty_fd, 4096)
+        if not value:
             raise SystemExit("Administrator setup was cancelled because the terminal closed.")
-        return value.rstrip("\r\n")
+        return value.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    def read_line(prompt: str) -> str:
+        write_terminal(prompt)
+        return read_terminal_line()
 
     def read_secret(prompt: str) -> str:
-        tty.write(prompt)
-        tty.flush()
-        fd = tty.fileno()
-        original = termios.tcgetattr(fd)
+        write_terminal(prompt)
+        original = termios.tcgetattr(tty_fd)
         hidden = original.copy()
         hidden[3] &= ~termios.ECHO
         try:
-            termios.tcsetattr(fd, termios.TCSAFLUSH, hidden)
-            value = tty.readline()
+            termios.tcsetattr(tty_fd, termios.TCSAFLUSH, hidden)
+            value = read_terminal_line()
         finally:
-            termios.tcsetattr(fd, termios.TCSAFLUSH, original)
-            tty.write("\n")
-            tty.flush()
-        if value == "":
-            raise SystemExit("Administrator setup was cancelled because the terminal closed.")
-        return value.rstrip("\r\n")
+            termios.tcsetattr(tty_fd, termios.TCSAFLUSH, original)
+            write_terminal("\n")
+        return value
 
     action = "Reset" if admin_exists else "Create"
-    tty.write(f"\n{action} Arc Strength administrator credentials\n")
+    write_terminal(f"\n{action} Arc Strength administrator credentials\n")
     while True:
         username = read_line("Administrator username: ").strip()
         if 3 <= len(username) <= 80:
             break
-        tty.write("Username must be 3–80 characters.\n")
+        write_terminal("Username must be 3–80 characters.\n")
     while True:
         password = read_secret("Passphrase (at least 15 characters): ")
         confirmation = read_secret("Confirm passphrase: ")
         if len(password) < 15:
-            tty.write("Passphrase must be at least 15 characters.\n")
+            write_terminal("Passphrase must be at least 15 characters.\n")
         elif len(password) > 128:
-            tty.write("Passphrase must be 128 characters or fewer.\n")
+            write_terminal("Passphrase must be 128 characters or fewer.\n")
         elif not secrets.compare_digest(password, confirmation):
-            tty.write("Passphrases did not match.\n")
+            write_terminal("Passphrases did not match.\n")
         else:
             break
     password_hash = generate_password_hash(password, method="scrypt")
@@ -244,8 +248,8 @@ if not admin_exists or reset_requested:
         conn.execute("DELETE FROM server_sessions")
     (Path(app.instance_path) / "setup-token").unlink(missing_ok=True)
     db.audit("admin_credentials_reset" if admin_exists else "admin_created_terminal", admin_id, cipher.digest("local-terminal"), "Administrator credentials set from start.sh")
-    tty.write("Administrator credentials saved. Roster and training data were not changed.\n\n")
-    tty.close()
+    write_terminal("Administrator credentials saved. Roster and training data were not changed.\n\n")
+    os.close(tty_fd)
 PY
 
 if [ "$RESET_ADMIN_CREDENTIALS" = "1" ]; then
