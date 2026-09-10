@@ -16,6 +16,27 @@ def test_legacy_unpadded_fernet_tokens(tmp_path):
     assert cipher.decrypt(token.rstrip(b"=")) == '{"Bench":150}'
 
 
+def test_production_configuration_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
+    monkeypatch.setenv("ARC_ENV", "production")
+    monkeypatch.setenv("ARC_TRUSTED_HOSTS", "*")
+    try:
+        create_app({"TESTING": True})
+    except RuntimeError as exc:
+        assert "ARC_TRUSTED_HOSTS" in str(exc)
+    else:
+        raise AssertionError("Production must not accept a wildcard host policy")
+
+    monkeypatch.setenv("ARC_TRUSTED_HOSTS", "localhost")
+    monkeypatch.setenv("ARC_SESSION_HOURS", "0")
+    try:
+        create_app({"TESTING": True})
+    except RuntimeError as exc:
+        assert "ARC_SESSION_HOURS" in str(exc)
+    else:
+        raise AssertionError("Invalid session lifetimes must fail during startup")
+
+
 def test_private_routes_and_first_setup(tmp_path, monkeypatch):
     monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
     monkeypatch.setenv("ARC_SECURE_COOKIES", "0")

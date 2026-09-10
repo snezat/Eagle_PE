@@ -21,12 +21,12 @@ Field encryption does not hide non-sensitive relational metadata such as interna
 Use an **unprivileged Ubuntu Server 26.04 LTS LXC** in Proxmox. Give it a static LAN address, allow enough memory for the OS plus Gunicorn, and keep application port 8000 private. The installer uses Ubuntu's current `python3` package and a private virtual environment, so it does not depend on a hard-coded Python minor version.
 
 1. Copy this directory to the LXC. It may initially be under `/root`; the installer copies application code to `/opt/arc-strength` and private data to `/var/lib/arc-strength`.
-2. From this directory, run `bash start.sh` as root. When the source is below `/root`, the launcher automatically invokes the LXC installer, places code in `/opt/arc-strength`, places private data in `/var/lib/arc-strength`, and prompts for the first administrator through `/dev/tty`. Running `sh deploy/install-lxc.sh "$PWD"` directly performs the same installation.
+2. From this directory, run `bash start.sh` as root. A root launch from any copied source directory automatically invokes the LXC installer, places code in `/opt/arc-strength`, places private data in `/var/lib/arc-strength`, and prompts for the first administrator through `/dev/tty`. Running `sh deploy/install-lxc.sh "$PWD"` directly performs the same installation.
 3. Edit `/etc/arc-strength.env`:
    - replace `strength.example.com` in `ARC_TRUSTED_HOSTS` with the real DNS name or internal hostname;
    - leave `ARC_SECURE_COOKIES=1` for HTTPS;
    - leave `ARC_PROXY_COUNT=1` when Caddy is the only reverse proxy.
-4. Replace the hostname in `deploy/Caddyfile`, then run `install -m 0644 deploy/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy`.
+4. Replace the hostname in `deploy/Caddyfile`, then run `cp deploy/Caddyfile /etc/caddy/Caddyfile && chmod 0644 /etc/caddy/Caddyfile && systemctl reload caddy`.
 5. Restart the app with `systemctl restart arc-strength` and check it with `systemctl status arc-strength --no-pager`.
 6. Open the HTTPS URL and sign in with the terminal-created administrator. For a noninteractive installation, retrieve the one-time token with `journalctl -u arc-strength -n 30 --no-pager`, then create the administrator account in the browser. After setup, the token file is deleted.
 
@@ -36,9 +36,11 @@ For a public DNS name, point its A/AAAA record at the network edge and forward o
 
 For a direct terminal-managed installation, run `chmod +x start.sh` once and then `./start.sh`. It checks Python, creates `.venv`, installs missing or changed dependencies, creates the encrypted database and keys, prompts through `/dev/tty` for the initial administrator username and hidden passphrase, and starts Gunicorn.
 
-When run as root below `/root`, `start.sh` automatically switches to the hardened LXC installation because the unprivileged service account cannot safely traverse `/root`. In other locations it drops foreground Gunicorn to the `arcstrength` account. It never runs Gunicorn as root.
+When run as root outside `/opt/arc-strength`, `start.sh` automatically switches to the hardened LXC installer. This avoids serving from a staging directory that the service account cannot safely traverse. A direct root-managed launch from `/opt/arc-strength` drops foreground Gunicorn to the `arcstrength` account; it never runs Gunicorn as root.
 
-Optional configuration is loaded from `.env`. Do not put the administrator password in that file. For an HTTPS reverse proxy, set `ARC_SECURE_COOKIES=1`, `ARC_PROXY_COUNT=1`, `LISTEN_ADDRESS=127.0.0.1:8000`, and the real hostname in `ARC_TRUSTED_HOSTS`.
+The fresh-container path installs its own Ubuntu/Debian prerequisites, including Caddy, Python, SQLite, `rsync`, and the account-management tools. It does not depend on the optional `install` command. If a previous attempt stopped partway through, copy the updated complete directory and run `bash start.sh` again. The process is idempotent: it preserves `/var/lib/arc-strength`, repairs its ownership and modes, and never replaces an existing encrypted database.
+
+Optional configuration is loaded from `.env`. Do not put the administrator password in that file. The launcher binds only to `127.0.0.1:8000` by default. For an HTTPS reverse proxy, set `ARC_SECURE_COOKIES=1`, `ARC_PROXY_COUNT=1`, keep `LISTEN_ADDRESS=127.0.0.1:8000`, and put the real hostname in `ARC_TRUSTED_HOSTS`.
 
 To change administrator credentials without changing roster or workout data, run `/opt/arc-strength/start.sh --reset-admin` as root on an installed LXC, or temporarily change `RESET_ADMIN_CREDENTIALS=0` near the top of `start.sh` to `1`. The command-only reset exits after saving the credentials; restart the service with `systemctl restart arc-strength`. After a file-setting reset, return it to `0`. Existing sessions are signed out; the database, encryption keys, athletes, assignments, prescriptions, results, and max history are preserved.
 

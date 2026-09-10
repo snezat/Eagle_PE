@@ -38,15 +38,26 @@ def test_public_assets_do_not_embed_roster_seed():
 def test_startup_and_lxc_files_have_required_safety_guards():
     start = (ROOT / "start.sh").read_text(encoding="utf-8")
     installer = (ROOT / "deploy" / "install-lxc.sh").read_text(encoding="utf-8")
+    backup = (ROOT / "scripts" / "backup.sh").read_text(encoding="utf-8")
     service = (ROOT / "deploy" / "arc-strength.service").read_text(encoding="utf-8")
     assert "termios.tcgetattr" in start
     assert "getpass.getpass" not in start
     assert start.index('. "$script_dir/.env"') < start.index('WORKERS="${ARC_WORKERS:-2}"')
     assert "Refusing to run Gunicorn as root" in start
-    assert 'sh "$script_dir/deploy/install-lxc.sh" "$script_dir"' in start
+    assert 'sh "$installer" "$script_dir"' in start
     assert "SETUP_ADMIN_ONLY" in start
+    assert "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" in start
     assert "sqlite3" in installer and ".backup" in installer
-    assert "sh /opt/arc-strength/start.sh --setup-admin-only" in installer
+    assert 'sh "$app_target/start.sh" "$setup_argument"' in installer
+    assert "base package installation failed" in installer
+    assert "chown -R arcstrength:arcstrength" in installer
+    assert 'chown -R root:root "$app_target"' in installer
+    assert 'chown -R arcstrength:arcstrength "$ARC_INSTANCE_PATH" "$venv"' not in start
+    assert 'chown -R root:root "$venv"' in start
+    assert "systemctl is-active --quiet arc-strength" in installer
+    assert "\ninstall " not in installer
+    assert "\ninstall " not in backup
+    assert "sqlite3" in backup and ".backup" in backup
     assert "systemctl restart arc-strength" in installer
     assert "User=arcstrength" in service
     assert "NoNewPrivileges=true" in service

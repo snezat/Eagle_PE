@@ -2,6 +2,11 @@
 set -eu
 umask 077
 
+# Minimal containers sometimes omit the administrative directories from root's
+# inherited PATH. Keep startup deterministic without relying on shell profiles.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 # Change this to 1 before starting when you want to replace the administrator
 # username and password. Change it back to 0 after the reset succeeds.
 # This updates only the administrator account; roster and training data remain intact.
@@ -20,7 +25,7 @@ case "${1:-}" in
         ;;
     "") ;;
     *)
-        echo "Usage: $0 [--reset-admin]" >&2
+        echo "Usage: $0 [--reset-admin|--setup-admin-only]" >&2
         exit 2
         ;;
 esac
@@ -28,22 +33,23 @@ esac
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$script_dir"
 
-# /root cannot be traversed by the unprivileged service account. On the common
-# Proxmox-LXC first-run path, transparently install into the protected production
-# locations instead of ever running Gunicorn as root.
-if [ "$(id -u)" -eq 0 ]; then
-    case "$script_dir" in
-        /root|/root/*)
-            if [ -f "$script_dir/deploy/install-lxc.sh" ]; then
-                echo "Installing Arc Strength from $script_dir into the LXC production paths…"
-                sh "$script_dir/deploy/install-lxc.sh" "$script_dir"
-                if [ "$CLI_RESET_REQUESTED" = "1" ]; then
-                    exec sh /opt/arc-strength/start.sh --reset-admin
-                fi
-                exit 0
-            fi
-            ;;
-    esac
+# A root launch from a copied source tree is an LXC installation request. Always
+# deploy to /opt and run the service from there; never serve application code from
+# /root, /tmp, or another staging directory.
+if [ "$(id -u)" -eq 0 ] && [ "$script_dir" != "/opt/arc-strength" ]; then
+    installer="$script_dir/deploy/install-lxc.sh"
+    if [ ! -f "$installer" ]; then
+        echo "Arc Strength installation failed: deploy/install-lxc.sh is missing." >&2
+        echo "Copy the complete arc-strength-webapp directory to the CT, then run start.sh from that directory." >&2
+        exit 1
+    fi
+    echo "Installing Arc Strength from $script_dir into the LXC production paths…"
+    if [ "$CLI_RESET_REQUESTED" = "1" ]; then
+        ARC_INSTALL_RESET_ADMIN=1 sh "$installer" "$script_dir"
+    else
+        sh "$installer" "$script_dir"
+    fi
+    exit 0
 fi
 
 # Optional owner-controlled configuration. Do not put a username or password here.
@@ -59,11 +65,11 @@ elif [ -f "$script_dir/.env" ]; then
     set +a
 fi
 
-# Gunicorn listens on every network interface by default. For an internet-facing
-# installation, put Caddy/Nginx in front and set LISTEN_ADDRESS=127.0.0.1:8000.
+# Gunicorn stays on loopback by default. Put Caddy/Nginx in front for network or
+# internet access; explicitly override this only for an isolated trusted LAN.
 # These defaults are evaluated after .env is loaded so ARC_WORKERS/ARC_THREADS
 # from that file take effect.
-LISTEN_ADDRESS="${LISTEN_ADDRESS:-0.0.0.0:8000}"
+LISTEN_ADDRESS="${LISTEN_ADDRESS:-127.0.0.1:8000}"
 WORKERS="${ARC_WORKERS:-2}"
 THREADS="${ARC_THREADS:-4}"
 
@@ -74,7 +80,8 @@ install_python() {
     fi
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            coreutils passwd python3 python3-venv python3-pip util-linux
     elif command -v apk >/dev/null 2>&1; then
         apk add --no-cache python3 py3-pip py3-virtualenv
     elif command -v dnf >/dev/null 2>&1; then
@@ -249,9 +256,16 @@ fi
 
 echo "Starting Arc Strength on $LISTEN_ADDRESS"
 echo "Trusted hosts: $ARC_TRUSTED_HOSTS"
-if [ "$(id -u)" -eq 0 ] && command -v runuser >/dev/null 2>&1; then
+if [ "$(id -u)" -eq 0 ]; then
+    if ! command -v runuser >/dev/null 2>&1 || ! command -v useradd >/dev/null 2>&1; then
+        echo "Refusing to run Gunicorn as root: runuser/useradd is unavailable." >&2
+        echo "On Ubuntu or Debian, install the passwd and util-linux packages, then retry." >&2
+        exit 1
+    fi
     id arcstrength >/dev/null 2>&1 || useradd --system --home "$ARC_INSTANCE_PATH" --shell /usr/sbin/nologin arcstrength
-    chown -R arcstrength:arcstrength "$ARC_INSTANCE_PATH" "$venv"
+    chown -R arcstrength:arcstrength "$ARC_INSTANCE_PATH"
+    chown -R root:root "$venv"
+    chmod -R u=rwX,go=rX "$venv"
     if ! runuser -u arcstrength -- test -r "$script_dir/wsgi.py" -a -x "$script_dir"; then
         echo "Refusing to run Gunicorn as root, and the arcstrength service account cannot read $script_dir." >&2
         echo "This commonly happens when the project is under /root. Move it to /opt/arc-strength," >&2

@@ -9,12 +9,23 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, abort, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, current_app, g, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from db import Database, StateConflictError, utcnow
 from security import FieldCipher, ensure_setup_token, new_secret_key
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a whole number") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -25,6 +36,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         os.chmod(instance, 0o700)
     app = Flask(__name__, instance_path=str(instance), instance_relative_config=True)
     secure_cookies = os.environ.get("ARC_SECURE_COOKIES", "1") != "0"
+    session_hours = _bounded_env_int("ARC_SESSION_HOURS", 12, 1, 168)
     app.config.update(
         SECRET_KEY=new_secret_key(instance),
         MAX_CONTENT_LENGTH=8 * 1024 * 1024,
@@ -32,18 +44,18 @@ def create_app(test_config: dict | None = None) -> Flask:
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SECURE=secure_cookies,
         SESSION_COOKIE_SAMESITE="Strict",
-        PERMANENT_SESSION_LIFETIME=timedelta(hours=int(os.environ.get("ARC_SESSION_HOURS", "12"))),
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=session_hours),
         DATABASE=os.environ.get("ARC_DATABASE_PATH", str(instance / "arc-strength.sqlite3")),
     )
     hosts = [x.strip() for x in os.environ.get("ARC_TRUSTED_HOSTS", "localhost,127.0.0.1").split(",") if x.strip()]
+    if hosts == ["*"] and os.environ.get("ARC_ENV", "production") == "production":
+        raise RuntimeError("ARC_TRUSTED_HOSTS cannot be '*' in production")
     if hosts and hosts != ["*"]:
         app.config["TRUSTED_HOSTS"] = hosts
     if test_config:
         app.config.update(test_config)
 
-    proxy_count = int(os.environ.get("ARC_PROXY_COUNT", "0"))
-    if not 0 <= proxy_count <= 5:
-        raise RuntimeError("ARC_PROXY_COUNT must be between 0 and 5")
+    proxy_count = _bounded_env_int("ARC_PROXY_COUNT", 0, 0, 5)
     if proxy_count:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_count, x_proto=proxy_count, x_host=proxy_count)
 
@@ -272,7 +284,7 @@ def _start_session(db: Database, cipher: FieldCipher, admin_id: int) -> None:
     sid = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(hours=int(os.environ.get("ARC_SESSION_HOURS", "12")))
+    expires = now + current_app.permanent_session_lifetime
     with db.connection() as conn:
         conn.execute("DELETE FROM server_sessions WHERE expires_at < ?", (now.isoformat(),))
         conn.execute("INSERT INTO server_sessions(id_hash,admin_id,csrf_hash,created_at,last_seen_at,expires_at,user_agent_hash) VALUES(?,?,?,?,?,?,?)", (
