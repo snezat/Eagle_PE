@@ -1,4 +1,6 @@
 # Replace the hostname before enabling. Caddy obtains and renews HTTPS certificates.
+# For a LAN-only hostname, add `tls internal` inside the site block and install
+# Caddy's local CA certificate on every coach/weight-room device.
 strength.example.com {
     encode zstd gzip
     reverse_proxy 127.0.0.1:8000
@@ -9,4 +11,3 @@ strength.example.com {
         max_size 8MB
     }
 }
-

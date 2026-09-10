@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -69,6 +70,14 @@ CREATE TABLE IF NOT EXISTS athlete_sports (
   PRIMARY KEY(athlete_id, sport_id)
 );
 CREATE INDEX IF NOT EXISTS idx_athlete_sports_sport ON athlete_sports(sport_id, athlete_id);
+CREATE TABLE IF NOT EXISTS attendance (
+  attendance_date TEXT NOT NULL,
+  class_group_id INTEGER NOT NULL REFERENCES class_groups(id),
+  athlete_id TEXT NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY(attendance_date, athlete_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_date_group ON attendance(attendance_date, class_group_id);
 CREATE TABLE IF NOT EXISTS assignments (
   id TEXT PRIMARY KEY,
   class_group_id INTEGER NOT NULL REFERENCES class_groups(id),
@@ -140,11 +149,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE TABLE IF NOT EXISTS state_meta (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0)
+);
+INSERT OR IGNORE INTO state_meta(id,revision) VALUES(1,0);
 """
 
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class StateConflictError(RuntimeError):
+    """Raised when a browser tries to overwrite a newer server state."""
+
+    def __init__(self, current_revision: int):
+        super().__init__("Planner data changed on another screen")
+        self.current_revision = current_revision
 
 
 class Database:
@@ -162,6 +184,18 @@ class Database:
         return conn
 
     @contextmanager
+    def connection(self):
+        conn = self.connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @contextmanager
     def transaction(self):
         conn = self.connect()
         try:
@@ -176,25 +210,25 @@ class Database:
 
     def initialize(self) -> None:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.executescript(SCHEMA)
             conn.execute("PRAGMA optimize")
         if os.name != "nt":
             os.chmod(self.path, 0o600)
 
     def admin_count(self) -> int:
-        with self.connect() as conn:
+        with self.connection() as conn:
             return int(conn.execute("SELECT count(*) FROM admins").fetchone()[0])
 
     def audit(self, event: str, admin_id: int | None, ip_hash: str, detail: str = "") -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.execute(
                 "INSERT INTO audit_log(event_type,admin_id,ip_hash,detail_enc,created_at) VALUES(?,?,?,?,?)",
                 (event, admin_id, ip_hash, self.cipher.encrypt(detail), utcnow()),
             )
 
     def get_state(self) -> dict[str, Any]:
-        with self.connect() as conn:
+        with self.connection() as conn:
             groups = conn.execute("SELECT id,name FROM class_groups ORDER BY sort_order,name").fetchall()
             sports = conn.execute("SELECT id,name FROM sports ORDER BY sort_order,name").fetchall()
             group_names = {r["id"]: r["name"] for r in groups}
@@ -266,18 +300,26 @@ class Database:
             settings = {}
             for row in conn.execute("SELECT setting_key,value_enc FROM app_settings"):
                 settings[row["setting_key"]] = json.loads(self.cipher.decrypt(row["value_enc"]) or "null")
+            attendance = [
+                {"date": row["attendance_date"], "group": group_names[row["class_group_id"]], "athleteId": row["athlete_id"], "checkedAt": row["checked_at"]}
+                for row in conn.execute("SELECT attendance_date,class_group_id,athlete_id,checked_at FROM attendance ORDER BY attendance_date,checked_at")
+            ]
             return {
                 "sports": [r["name"] for r in sports], "sportGroups": sport_groups,
                 "classGroups": [r["name"] for r in groups], "athletes": athletes,
-                "assignments": assignments, "prescriptions": prescriptions, "suggestions": suggestions,
+                "assignments": assignments, "prescriptions": prescriptions, "suggestions": suggestions, "attendance": attendance,
                 "liftLibrary": settings.get("liftLibrary", ["Bench", "Back Squat", "Power Clean", "Deadlift"]),
+                "revision": int(conn.execute("SELECT revision FROM state_meta WHERE id=1").fetchone()[0]),
             }
 
-    def replace_state(self, state: dict[str, Any]) -> None:
+    def replace_state(self, state: dict[str, Any], expected_revision: int) -> int:
         _validate_state(state)
         now = utcnow()
         with self.transaction() as conn:
-            for table in ("suggestions", "prescriptions", "assignments", "athlete_sports", "athletes", "sport_groups", "sports", "class_groups"):
+            current_revision = int(conn.execute("SELECT revision FROM state_meta WHERE id=1").fetchone()[0])
+            if expected_revision != current_revision:
+                raise StateConflictError(current_revision)
+            for table in ("suggestions", "prescriptions", "assignments", "attendance", "athlete_sports", "athletes", "sport_groups", "sports", "class_groups"):
                 conn.execute(f"DELETE FROM {table}")
             groups = list(dict.fromkeys(str(x).strip() for x in state.get("classGroups", []) if str(x).strip()))
             sports = list(dict.fromkeys(str(x).strip() for x in state.get("sports", []) if str(x).strip()))
@@ -294,12 +336,14 @@ class Database:
                     conn.execute("INSERT OR IGNORE INTO sport_groups(sport_id,name) VALUES(?,?)", (sport_ids[sport], name))
             athletes = state.get("athletes", [])
             name_to_id = {}
+            valid_athlete_ids = set()
             for i, athlete in enumerate(athletes):
                 athlete_id = str(athlete.get("id") or f"athlete-{i+1}")[:80]
                 name = str(athlete.get("name", "")).strip()
                 if not name:
                     continue
                 name_to_id[name] = athlete_id
+                valid_athlete_ids.add(athlete_id)
                 conn.execute("""INSERT INTO athletes(id,name_enc,name_lookup,grade_enc,teacher_enc,class_group_id,subgroup_enc,maxes_enc,overrides_enc,created_at,updated_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (
                     athlete_id, self.cipher.encrypt(name), self.cipher.lookup(name), self.cipher.encrypt(athlete.get("grade", "")),
@@ -314,6 +358,14 @@ class Database:
                             athlete_id, sport_ids[sport], self.cipher.encrypt(group_by_sport.get(sport, ""))
                         ))
             assignment_ids = set()
+            for record in state.get("attendance", []):
+                athlete_id = str(record.get("athleteId", ""))[:80]
+                group = record.get("group")
+                date = str(record.get("date", ""))[:10]
+                if athlete_id in valid_athlete_ids and group in group_ids and date:
+                    conn.execute("INSERT OR REPLACE INTO attendance(attendance_date,class_group_id,athlete_id,checked_at) VALUES(?,?,?,?)", (
+                        date, group_ids[group], athlete_id, str(record.get("checkedAt") or now)[:40]
+                    ))
             for a in state.get("assignments", []):
                 if a.get("group") not in group_ids:
                     continue
@@ -330,7 +382,7 @@ class Database:
             prescription_ids = set()
             for p in state.get("prescriptions", []):
                 athlete_id = p.get("athleteId") or name_to_id.get(p.get("athleteName"))
-                if p.get("assignmentId") not in assignment_ids or athlete_id not in {a["id"] for a in athletes if a.get("id")} | set(name_to_id.values()):
+                if p.get("assignmentId") not in assignment_ids or athlete_id not in valid_athlete_ids:
                     continue
                 pid = str(p.get("id", ""))[:100]
                 if not pid:
@@ -357,6 +409,37 @@ class Database:
             conn.execute("INSERT INTO app_settings(setting_key,value_enc,updated_at) VALUES(?,?,?)", (
                 "liftLibrary", self.cipher.encrypt(json.dumps(state.get("liftLibrary", []), separators=(",", ":"))), now
             ))
+            new_revision = current_revision + 1
+            conn.execute("UPDATE state_meta SET revision=? WHERE id=1", (new_revision,))
+        return new_revision
+
+    def set_attendance(self, attendance_date: str, group: str, athlete_id: str, present: bool) -> int:
+        try:
+            datetime.fromisoformat(attendance_date).date()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid attendance date") from exc
+        if len(attendance_date) != 10 or len(athlete_id) > 80 or not athlete_id:
+            raise ValueError("Invalid attendance record")
+        with self.transaction() as conn:
+            row = conn.execute(
+                """SELECT a.id,a.class_group_id,g.name AS group_name
+                   FROM athletes a LEFT JOIN class_groups g ON g.id=a.class_group_id
+                   WHERE a.id=?""",
+                (athlete_id,),
+            ).fetchone()
+            if not row or row["group_name"] != group:
+                raise ValueError("Athlete is not assigned to that class group")
+            if present:
+                conn.execute(
+                    "INSERT OR REPLACE INTO attendance(attendance_date,class_group_id,athlete_id,checked_at) VALUES(?,?,?,?)",
+                    (attendance_date, row["class_group_id"], athlete_id, utcnow()),
+                )
+            else:
+                conn.execute("DELETE FROM attendance WHERE attendance_date=? AND athlete_id=?", (attendance_date, athlete_id))
+            current_revision = int(conn.execute("SELECT revision FROM state_meta WHERE id=1").fetchone()[0])
+            new_revision = current_revision + 1
+            conn.execute("UPDATE state_meta SET revision=? WHERE id=1", (new_revision,))
+        return new_revision
 
 
 def _number(value):
@@ -370,14 +453,184 @@ def _integer(value):
 def _validate_state(state: dict[str, Any]) -> None:
     if not isinstance(state, dict):
         raise ValueError("State must be an object")
-    limits = {"athletes": 2000, "assignments": 20000, "prescriptions": 100000, "suggestions": 100000, "sports": 100, "classGroups": 50}
+    limits = {"athletes": 2000, "assignments": 20000, "prescriptions": 100000, "suggestions": 100000, "attendance": 500000, "sports": 100, "classGroups": 50}
     for key, limit in limits.items():
         value = state.get(key, [])
         if not isinstance(value, list) or len(value) > limit:
             raise ValueError(f"Invalid {key}")
+    sport_groups = state.get("sportGroups", {})
+    lift_library = state.get("liftLibrary", [])
+    if not isinstance(sport_groups, dict) or len(sport_groups) > 100:
+        raise ValueError("Invalid sportGroups")
+    if not isinstance(lift_library, list) or len(lift_library) > 500:
+        raise ValueError("Invalid liftLibrary")
+
+    groups = _validated_text_list(state.get("classGroups", []), "class group", 100)
+    sports = _validated_text_list(state.get("sports", []), "sport", 100)
+    group_set, sport_set = set(groups), set(sports)
+    for sport, names in sport_groups.items():
+        if sport not in sport_set or not isinstance(names, list) or len(names) > 200:
+            raise ValueError("Invalid sport training groups")
+        _validated_text_list(names, "sport training group", 100)
+    _validated_text_list(lift_library, "lift", 200)
+
+    athlete_ids: set[str] = set()
+    athlete_groups: dict[str, str] = {}
     for athlete in state.get("athletes", []):
-        if not isinstance(athlete, dict) or len(str(athlete.get("name", ""))) > 200:
+        if not isinstance(athlete, dict):
             raise ValueError("Invalid athlete")
+        athlete_id = _validated_id(athlete.get("id"), "athlete")
+        if len(athlete_id) > 80:
+            raise ValueError("Invalid athlete id")
+        if athlete_id in athlete_ids:
+            raise ValueError("Duplicate athlete id")
+        athlete_ids.add(athlete_id)
+        _validated_text(athlete.get("name"), "athlete name", 200, allow_empty=False)
+        _validated_text(athlete.get("grade", ""), "grade", 20)
+        _validated_text(athlete.get("teacher", ""), "teacher", 100)
+        _validated_text(athlete.get("subgroup", ""), "subgroup", 100)
+        class_group = athlete.get("classGroup")
+        if class_group not in group_set:
+            raise ValueError("Athlete has an invalid class group")
+        athlete_groups[athlete_id] = class_group
+        athlete_sports = athlete.get("sports", [])
+        if not isinstance(athlete_sports, list) or len(athlete_sports) > len(sports) or any(value not in sport_set for value in athlete_sports) or len(set(athlete_sports)) != len(athlete_sports):
+            raise ValueError("Athlete has invalid sports")
+        group_by_sport = athlete.get("groupBySport", {})
+        if not isinstance(group_by_sport, dict) or any(key not in athlete_sports for key in group_by_sport):
+            raise ValueError("Athlete has invalid sport training groups")
+        for value in group_by_sport.values():
+            _validated_text(value, "sport training group", 100)
+        _validated_number_map(athlete.get("maxes", {}), "maxes")
+        _validated_number_map(athlete.get("overrides", {}), "overrides")
+
+    assignment_ids: set[str] = set()
     for assignment in state.get("assignments", []):
-        if not isinstance(assignment, dict) or len(str(assignment.get("lift", ""))) > 200 or len(str(assignment.get("notes", ""))) > 2000:
+        if not isinstance(assignment, dict):
             raise ValueError("Invalid assignment")
+        assignment_id = _validated_id(assignment.get("id"), "assignment")
+        if assignment_id in assignment_ids:
+            raise ValueError("Duplicate assignment id")
+        assignment_ids.add(assignment_id)
+        if assignment.get("group") not in group_set or assignment.get("sport", "all") not in sport_set | {"all"}:
+            raise ValueError("Assignment has an invalid group or sport")
+        _validated_date(assignment.get("date"), "assignment date")
+        _validated_text(assignment.get("lift"), "lift", 200, allow_empty=False)
+        _validated_text(assignment.get("notes", ""), "assignment notes", 2000)
+        _validated_integer(assignment.get("percent"), "percentage", 1, 100)
+        for key in ("sets", "reps", "expected"):
+            _validated_integer(assignment.get(key), key, 1, 1000)
+        _validated_integer(assignment.get("createdAt", 0), "createdAt", 0, 9_223_372_036_854_775_807)
+        for key in ("locked", "priority"):
+            if not isinstance(assignment.get(key, False), bool):
+                raise ValueError(f"Invalid {key}")
+
+    prescription_ids: set[str] = set()
+    for prescription in state.get("prescriptions", []):
+        if not isinstance(prescription, dict):
+            raise ValueError("Invalid prescription")
+        prescription_id = _validated_id(prescription.get("id"), "prescription")
+        if prescription_id in prescription_ids:
+            raise ValueError("Duplicate prescription id")
+        prescription_ids.add(prescription_id)
+        if prescription.get("assignmentId") not in assignment_ids or prescription.get("athleteId") not in athlete_ids:
+            raise ValueError("Prescription references a missing assignment or athlete")
+        _validated_text(prescription.get("lift"), "prescription lift", 200, allow_empty=False)
+        _validated_text(prescription.get("note", ""), "result note", 2000)
+        for key in ("sets", "reps", "expected"):
+            _validated_integer(prescription.get(key), key, 1, 1000)
+        for key in ("projectedMaxUsed", "prescribedLoad", "completedLoad"):
+            _validated_number(prescription.get(key), key, 0, 5000, allow_empty=True)
+        _validated_integer(prescription.get("burnoutReps"), "burnout reps", 0, 1000, allow_empty=True)
+        for key in ("submitted", "loadMismatch", "needsReview", "isIndividualOverride"):
+            if not isinstance(prescription.get(key, False), bool):
+                raise ValueError(f"Invalid {key}")
+
+    suggestion_ids: set[str] = set()
+    for suggestion in state.get("suggestions", []):
+        if not isinstance(suggestion, dict):
+            raise ValueError("Invalid suggestion")
+        suggestion_id = _validated_id(suggestion.get("id"), "suggestion")
+        if suggestion_id in suggestion_ids:
+            raise ValueError("Duplicate suggestion id")
+        suggestion_ids.add(suggestion_id)
+        if suggestion.get("prescriptionId") not in prescription_ids or suggestion.get("assignmentId") not in assignment_ids or suggestion.get("athleteId") not in athlete_ids:
+            raise ValueError("Suggestion references missing data")
+        _validated_text(suggestion.get("lift"), "suggestion lift", 200, allow_empty=False)
+        for key in ("oldMax", "suggestedMax", "manualMax"):
+            _validated_number(suggestion.get(key), key, 0, 5000, allow_empty=True)
+        for key in ("burnoutReps", "expected"):
+            _validated_integer(suggestion.get(key), key, 0, 1000, allow_empty=True)
+        if suggestion.get("status", "pending") not in {"pending", "approved", "rejected"} or not isinstance(suggestion.get("extreme", False), bool):
+            raise ValueError("Invalid suggestion status")
+
+    attendance_keys: set[tuple[str, str]] = set()
+    for record in state.get("attendance", []):
+        if not isinstance(record, dict):
+            raise ValueError("Invalid attendance record")
+        attendance_date = _validated_date(record.get("date"), "attendance date")
+        athlete_id = record.get("athleteId")
+        group = record.get("group")
+        if athlete_id not in athlete_ids or athlete_groups.get(athlete_id) != group:
+            raise ValueError("Attendance references an invalid athlete or group")
+        key = (attendance_date, athlete_id)
+        if key in attendance_keys:
+            raise ValueError("Duplicate attendance record")
+        attendance_keys.add(key)
+        _validated_text(record.get("checkedAt", ""), "attendance timestamp", 40)
+
+
+def _validated_text(value: Any, label: str, maximum: int, *, allow_empty: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {label}")
+    if (not allow_empty and not value.strip()) or len(value) > maximum or "\x00" in value:
+        raise ValueError(f"Invalid {label}")
+    return value.strip()
+
+
+def _validated_text_list(values: list[Any], label: str, maximum: int) -> list[str]:
+    normalized = [_validated_text(value, label, maximum, allow_empty=False) for value in values]
+    if len({value.casefold() for value in normalized}) != len(normalized):
+        raise ValueError(f"Duplicate {label}")
+    return normalized
+
+
+def _validated_id(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 100 or any(ord(char) < 32 for char in value):
+        raise ValueError(f"Invalid {label} id")
+    return value
+
+
+def _validated_date(value: Any, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 10:
+        raise ValueError(f"Invalid {label}")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {label}") from exc
+    return value
+
+
+def _validated_number(value: Any, label: str, minimum: float, maximum: float, *, allow_empty: bool = False) -> float | None:
+    if allow_empty and value in (None, ""):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(f"Invalid {label}")
+    return float(value)
+
+
+def _validated_integer(value: Any, label: str, minimum: int, maximum: int, *, allow_empty: bool = False) -> int | None:
+    number = _validated_number(value, label, minimum, maximum, allow_empty=allow_empty)
+    if number is None:
+        return None
+    if not number.is_integer():
+        raise ValueError(f"Invalid {label}")
+    return int(number)
+
+
+def _validated_number_map(value: Any, label: str) -> None:
+    if not isinstance(value, dict) or len(value) > 500:
+        raise ValueError(f"Invalid {label}")
+    for key, number in value.items():
+        _validated_text(key, "lift name", 200, allow_empty=False)
+        _validated_number(number, label, 1, 5000)

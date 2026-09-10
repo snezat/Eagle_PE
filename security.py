@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import stat
 from pathlib import Path
 
 from cryptography.fernet import Fernet, MultiFernet
@@ -18,15 +19,34 @@ def _write_private(path: Path, value: bytes) -> None:
         os.close(fd)
 
 
+def _read_private(path: Path) -> bytes:
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing unsafe secret-key path: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise RuntimeError(f"Refusing unsafe secret-key path: {path}")
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        chunks = []
+        while chunk := os.read(fd, 4096):
+            chunks.append(chunk)
+        return b"".join(chunks).strip()
+    finally:
+        os.close(fd)
+
+
 def load_or_create_bytes(path: Path, generator) -> bytes:
     try:
-        return path.read_bytes().strip()
+        return _read_private(path)
     except FileNotFoundError:
         value = generator()
         try:
             _write_private(path, value)
         except FileExistsError:
-            return path.read_bytes().strip()
+            return _read_private(path)
         return value
 
 
@@ -38,6 +58,10 @@ class FieldCipher:
         old_keys = []
         old_path = instance_path / "old-master.keys"
         if old_path.exists():
+            if old_path.is_symlink() or not old_path.is_file():
+                raise RuntimeError(f"Refusing unsafe old-key path: {old_path}")
+            if os.name != "nt":
+                os.chmod(old_path, 0o600)
             old_keys = [line.strip() for line in old_path.read_bytes().splitlines() if line.strip()]
         self._fernet = MultiFernet([Fernet(primary), *[Fernet(key) for key in old_keys]])
         self._lookup_key = load_or_create_bytes(
@@ -53,6 +77,10 @@ class FieldCipher:
         if value is None:
             return None
         raw = value.encode() if isinstance(value, str) else value
+        # The original one-time Node roster/max importer emitted otherwise-valid
+        # URL-safe Fernet tokens without trailing Base64 padding. Accept those
+        # legacy records while all new Python writes use canonical Fernet output.
+        raw += b"=" * (-len(raw) % 4)
         return self._fernet.decrypt(raw).decode("utf-8")
 
     def lookup(self, value: str) -> str:
@@ -71,4 +99,3 @@ def ensure_setup_token(instance_path: Path) -> str:
     return load_or_create_bytes(
         instance_path / "setup-token", lambda: secrets.token_urlsafe(32).encode()
     ).decode()
-

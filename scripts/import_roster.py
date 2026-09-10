@@ -61,13 +61,14 @@ def main() -> None:
         "assignments": existing["assignments"] if args.replace else [],
         "prescriptions": existing["prescriptions"] if args.replace else [],
         "suggestions": existing["suggestions"] if args.replace else [],
+        "attendance": existing.get("attendance", []) if args.replace else [],
         "liftLibrary": existing.get("liftLibrary") or ["Bench", "Back Squat", "Power Clean", "Deadlift", "Front Squat"],
+        "revision": existing.get("revision", 0),
     }
-    db.replace_state(state)
+    db.replace_state(state, state["revision"])
     counts = {group: sum(a["classGroup"] == group for a in athletes) for group in state["classGroups"]}
     print(f"Imported {len(athletes)} encrypted athlete records: {counts}")
 
 
 if __name__ == "__main__":
     main()
-

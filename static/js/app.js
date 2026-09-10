@@ -12,11 +12,12 @@ const today = () => {
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
   return date.toISOString().slice(0, 10);
 };
-const initialState = {sports: [], sportGroups: {}, classGroups: [], athletes: [], assignments: [], prescriptions: [], suggestions: [], liftLibrary: []};
+const initialState = {sports: [], sportGroups: {}, classGroups: [], athletes: [], assignments: [], prescriptions: [], suggestions: [], attendance: [], liftLibrary: [], revision: 0};
 let state = structuredClone(initialState);
 let rosterEditing = false;
 let selectedAthletes = new Set();
 let tvMode = "both";
+let attendanceGroup = "Nonfootball Group A";
 let saving = false;
 let saveQueued = false;
 
@@ -47,7 +48,7 @@ function message(id, text) {
 
 async function loadState() {
   const response = await fetch("/api/state", {credentials: "same-origin", headers: {Accept: "application/json"}});
-  if (response.status === 401) throw new Error("session");
+  if (response.status === 401) { location.href = "/"; throw new Error("session"); }
   if (!response.ok) throw new Error("load");
   state = {...structuredClone(initialState), ...await response.json()};
 }
@@ -62,9 +63,17 @@ async function saveState() {
       headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
       body: JSON.stringify(state),
     });
-    if (response.status === 401) location.href = "/";
-    if (!response.ok) throw new Error((await response.json()).error || "Save failed");
+    if (response.status === 401) { location.href = "/"; return false; }
+    const result = await response.json();
+    if (response.status === 409) {
+      await loadState(); renderAll();
+      $("#save-status").textContent = "Another screen changed the planner — reloaded latest data";
+      return false;
+    }
+    if (!response.ok) throw new Error(result.error || "Save failed");
+    state.revision = Number(result.revision ?? state.revision);
     $("#save-status").textContent = `Saved securely · ${new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}`;
+    return true;
   } catch (error) {
     $("#save-status").textContent = "Save failed — try again";
     console.error(error);
@@ -72,6 +81,18 @@ async function saveState() {
     saving = false;
     if (saveQueued) { saveQueued = false; saveState(); }
   }
+}
+
+async function saveAttendance(date, group, athleteId, present) {
+  const response = await fetch("/api/attendance", {
+    method: "PUT", credentials: "same-origin",
+    headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
+    body: JSON.stringify({date, group, athleteId, present}),
+  });
+  if (response.status === 401) { location.href = "/"; throw new Error("session"); }
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Attendance save failed");
+  state.revision = Math.max(Number(state.revision || 0), Number(result.revision || 0));
 }
 
 function setupNavigation() {
@@ -207,6 +228,37 @@ function renderLiftManager() {
   });
 }
 
+function allLiftNames() {
+  return [...new Set(state.liftLibrary.map(name => String(name || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function renderLiftDropdown() {
+  const host = $("#lift-dropdown"); host.replaceChildren();
+  const names = allLiftNames();
+  names.forEach(name => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = name;
+    button.addEventListener("click", () => {
+      $("#a-lift").value = name;
+      host.hidden = true;
+      $("#open-lifts").setAttribute("aria-expanded", "false");
+      $("#a-lift").focus();
+    });
+    host.append(button);
+  });
+  if (!names.length) {
+    const empty = document.createElement("div"); empty.className = "empty-lifts"; empty.textContent = "No saved lifts yet. Type a new lift name to add one."; host.append(empty);
+  }
+}
+
+function toggleLiftDropdown(force) {
+  const host = $("#lift-dropdown"), open = force ?? host.hidden;
+  if (open) renderLiftDropdown();
+  host.hidden = !open;
+  $("#open-lifts").setAttribute("aria-expanded", String(open));
+}
+
 function assignmentLabel(a) { return `${a.date} · ${a.group.replace("Nonfootball ", "")} · ${a.lift}`; }
 
 function renderResults() {
@@ -280,14 +332,19 @@ async function decideSuggestion(id, status, manualMax) {
 }
 
 function renderRoster() {
-  optionList($("#f-sport"), state.sports, "All sports", $("#f-sport").value);
+  const sportSelect = $("#f-sport"), chosenSport = sportSelect.value || "all";
+  sportSelect.replaceChildren(new Option("All athletes", "all"), new Option("No sport assigned", "unassigned"), ...state.sports.map(sport => new Option(sport, sport)));
+  sportSelect.value = [...sportSelect.options].some(option => option.value === chosenSport) ? chosenSport : "all";
   optionList($("#f-class"), state.classGroups, "All groups", $("#f-class").value);
   optionList($("#new-group"), state.classGroups, null, $("#new-group").value);
-  const sport = $("#f-sport").value, group = $("#f-class").value, query = $("#f-search").value.trim().toLowerCase();
-  const visible = state.athletes.filter(a => (sport === "all" || a.sports.includes(sport)) && (group === "all" || a.classGroup === group) && (!query || a.name.toLowerCase().includes(query)));
-  $("#roster-count").textContent = `${visible.length} athletes`;
-  $("#roster-title").textContent = [group !== "all" ? group : "All athletes", sport !== "all" ? sport : ""].filter(Boolean).join(" · ");
+  const sport = sportSelect.value;
+  const subgroupNames = sport === "all" ? [...new Set(Object.values(state.sportGroups || {}).flat())].sort((a, b) => a.localeCompare(b)) : sport === "unassigned" ? [] : (state.sportGroups[sport] || []);
+  optionList($("#f-sub"), subgroupNames, "All training groups", $("#f-sub").value);
+  const visible = visibleRosterAthletes();
+  $("#roster-count").textContent = `${visible.length} shown · ${state.athletes.length} total`;
+  $("#roster-title").textContent = sport === "all" ? "All athletes" : sport === "unassigned" ? "No sport assigned" : `${sport} roster`;
   $$(".select-column").forEach(el => el.hidden = !rosterEditing); $("#remove-athletes").hidden = !rosterEditing;
+  $("#remove-athletes").textContent = sport !== "all" && sport !== "unassigned" ? `Remove from ${sport}` : "Remove selected athletes";
   const body = $("#roster"); body.replaceChildren();
   visible.forEach(athlete => {
     const row = document.createElement("tr");
@@ -295,14 +352,58 @@ function renderRoster() {
     const who = document.createElement("div"); const name = document.createElement("div"); name.className = "athlete-name"; name.textContent = athlete.name; const meta = document.createElement("div"); meta.className = "athlete-meta"; meta.textContent = [athlete.grade ? `Grade ${athlete.grade}` : "", athlete.teacher].filter(Boolean).join(" · "); who.append(name, meta); row.append(cell(who));
     if (rosterEditing) {
       const groupSelect = document.createElement("select"); optionList(groupSelect, state.classGroups, null, athlete.classGroup); groupSelect.addEventListener("change", async () => { athlete.classGroup = groupSelect.value; await saveState(); renderAll(); }); row.append(cell(groupSelect));
-      const checks = document.createElement("div"); checks.className = "checks"; state.sports.forEach(s => { const label = document.createElement("label"), input = document.createElement("input"); input.type = "checkbox"; input.checked = athlete.sports.includes(s); input.addEventListener("change", async () => { athlete.sports = input.checked ? [...new Set([...athlete.sports, s])] : athlete.sports.filter(x => x !== s); await saveState(); renderAll(); }); label.append(input, document.createTextNode(s)); checks.append(label); }); row.append(cell(checks));
+      const checks = document.createElement("div"); checks.className = "checks"; state.sports.forEach(s => { const label = document.createElement("label"), input = document.createElement("input"); input.type = "checkbox"; input.checked = athlete.sports.includes(s); input.addEventListener("change", async () => { athlete.groupBySport ||= {}; athlete.sports = input.checked ? [...new Set([...athlete.sports, s])] : athlete.sports.filter(x => x !== s); if (!input.checked) delete athlete.groupBySport[s]; await saveState(); renderAll(); }); label.append(input, document.createTextNode(s)); checks.append(label); }); row.append(cell(checks));
+      const subgroups = document.createElement("div"); subgroups.className = "subgroup-editor"; athlete.groupBySport ||= {};
+      athlete.sports.forEach(s => { const label = document.createElement("label"), select = document.createElement("select"); label.append(document.createTextNode(s)); select.append(new Option("Unassigned", ""), ...(state.sportGroups[s] || []).map(name => new Option(name, name))); select.value = athlete.groupBySport[s] || ""; select.addEventListener("change", async () => { select.value ? athlete.groupBySport[s] = select.value : delete athlete.groupBySport[s]; await saveState(); renderRoster(); }); label.append(select); subgroups.append(label); }); row.append(cell(subgroups));
       const maxes = document.createElement("div"); maxes.className = "checks"; ["Bench", "Back Squat", "Power Clean", "Deadlift"].forEach(lift => { const label = document.createElement("label"); label.textContent = lift; const input = document.createElement("input"); input.type = "number"; input.step = "5"; input.value = athlete.maxes?.[lift] || ""; input.addEventListener("change", async () => { athlete.maxes ||= {}; input.value === "" ? delete athlete.maxes[lift] : athlete.maxes[lift] = Number(input.value); await saveState(); }); label.append(input); maxes.append(label); }); row.append(cell(maxes));
     } else {
-      row.append(cell(athlete.classGroup), cell(athlete.sports.join(", ") || "No sport"));
+      const sports = document.createElement("div"); sports.className = "roster-sports"; (athlete.sports.length ? athlete.sports : ["No sport"]).forEach(value => { const tag = document.createElement("span"); tag.className = "badge"; tag.textContent = value; sports.append(tag); });
+      const subgroups = document.createElement("div"); subgroups.className = "roster-subgroups"; athlete.sports.forEach(s => { const line = document.createElement("span"); line.textContent = `${s}: ${athlete.groupBySport?.[s] || "Unassigned"}`; subgroups.append(line); });
+      row.append(cell(athlete.classGroup), cell(sports), cell(subgroups));
       const values = Object.entries(athlete.maxes || {}).map(([lift, max]) => `${lift}: ${max}`).join(" · "); row.append(cell(values || "No starting maxes"));
     }
     body.append(row);
   });
+  if (!visible.length) { const row = document.createElement("tr"), td = cell("No athletes match these filters."); td.colSpan = rosterEditing ? 7 : 6; td.className = "empty-row"; row.append(td); body.append(row); }
+}
+
+function visibleRosterAthletes() {
+  const sport = $("#f-sport").value || "all", group = $("#f-class").value || "all", subgroup = $("#f-sub").value || "all", query = $("#f-search").value.trim().toLowerCase();
+  return state.athletes.filter(athlete =>
+    (sport === "all" || sport === "unassigned" && !athlete.sports.length || athlete.sports.includes(sport)) &&
+    (group === "all" || athlete.classGroup === group) &&
+    (subgroup === "all" || sport !== "all" && sport !== "unassigned" && athlete.groupBySport?.[sport] === subgroup || sport === "all" && Object.values(athlete.groupBySport || {}).includes(subgroup)) &&
+    (!query || athlete.name.toLowerCase().includes(query))
+  );
+}
+
+function renderRosterSetup() {
+  const renderChips = (host, values) => { host.replaceChildren(); values.forEach(value => { const chip = document.createElement("span"); chip.className = "chip"; chip.textContent = value; host.append(chip); }); };
+  renderChips($("#class-options"), state.classGroups);
+  renderChips($("#sport-options"), state.sports);
+  optionList($("#sub-sport"), state.sports, null, $("#sub-sport").value);
+  const sport = $("#sub-sport").value;
+  renderChips($("#sub-options"), state.sportGroups?.[sport] || []);
+}
+
+async function addClassGroup() {
+  const name = $("#new-class").value.trim();
+  if (!name || state.classGroups.some(value => value.toLowerCase() === name.toLowerCase())) { message("f-message", name ? "That class group already exists." : "Enter a class group name."); return; }
+  state.classGroups.push(name); $("#new-class").value = ""; await saveState(); renderAll();
+}
+
+async function addSport() {
+  const name = $("#new-sport").value.trim();
+  if (!name || state.sports.some(value => value.toLowerCase() === name.toLowerCase())) { message("f-message", name ? "That sport already exists." : "Enter a sport name."); return; }
+  state.sports.push(name); state.sportGroups ||= {}; state.sportGroups[name] = []; $("#new-sport").value = ""; await saveState(); renderAll();
+}
+
+async function addSportGroup() {
+  const sport = $("#sub-sport").value, name = $("#new-sub").value.trim(); state.sportGroups ||= {};
+  if (!sport) { message("f-message", "Add a sport before creating a sport training group."); return; }
+  const groups = state.sportGroups[sport] ||= [];
+  if (!name || groups.some(value => value.toLowerCase() === name.toLowerCase())) { message("f-message", !name ? "Enter a sport training group name." : "That sport training group already exists."); return; }
+  groups.push(name); $("#new-sub").value = ""; await saveState(); renderAll();
 }
 
 function renderNewAthleteSports() {
@@ -317,9 +418,19 @@ async function addAthlete() {
 }
 
 async function removeSelectedAthletes() {
-  if (!selectedAthletes.size || !confirm(`Remove ${selectedAthletes.size} selected athletes and their associated records?`)) return;
-  const removed = new Set(selectedAthletes); state.athletes = state.athletes.filter(a => !removed.has(a.id));
-  state.prescriptions = state.prescriptions.filter(p => !removed.has(p.athleteId)); state.suggestions = state.suggestions.filter(s => !removed.has(s.athleteId)); selectedAthletes.clear(); await saveState(); renderAll();
+  if (!selectedAthletes.size) { message("f-message", "Select athletes first."); return; }
+  const sport = $("#f-sport").value;
+  if (sport !== "all" && sport !== "unassigned") {
+    if (!confirm(`Remove ${selectedAthletes.size} selected athletes from ${sport}? Their athlete records and other sports will remain.`)) return;
+    state.athletes.forEach(athlete => { if (selectedAthletes.has(athlete.id)) { athlete.sports = athlete.sports.filter(value => value !== sport); if (athlete.groupBySport) delete athlete.groupBySport[sport]; } });
+    message("f-message", `Removed ${selectedAthletes.size} athletes from ${sport}.`);
+  } else {
+    if (!confirm(`Remove ${selectedAthletes.size} selected athletes and their associated records?`)) return;
+    const removed = new Set(selectedAthletes); state.athletes = state.athletes.filter(a => !removed.has(a.id));
+    state.prescriptions = state.prescriptions.filter(p => !removed.has(p.athleteId)); state.suggestions = state.suggestions.filter(s => !removed.has(s.athleteId)); state.attendance = state.attendance.filter(record => !removed.has(record.athleteId));
+    message("f-message", `Removed ${selectedAthletes.size} athletes.`);
+  }
+  selectedAthletes.clear(); await saveState(); renderAll();
 }
 
 function sportClass(sport) { return `sport-${sport.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "all"}`; }
@@ -352,28 +463,74 @@ function updateClock() {
   const now = new Date(); $("#tv-time").textContent = now.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}); $("#tv-day").textContent = now.toLocaleDateString([], {weekday: "long", month: "long", day: "numeric", year: "numeric"});
 }
 
+function renderAttendance() {
+  const dateInput = $("#attendance-date");
+  dateInput.value ||= today();
+  const date = dateInput.value;
+  const athletes = state.athletes.filter(a => a.classGroup === attendanceGroup).sort((a, b) => {
+    const last = name => name.trim().split(/\s+/).at(-1) || name;
+    return last(a.name).localeCompare(last(b.name)) || a.name.localeCompare(b.name);
+  });
+  const columns = window.innerWidth < 900 ? 3 : 4;
+  const grid = $("#attendance-grid");
+  grid.style.setProperty("--attendance-rows", String(Math.max(1, Math.ceil(athletes.length / columns))));
+  grid.replaceChildren();
+  const present = new Set(state.attendance.filter(record => record.date === date && record.group === attendanceGroup).map(record => record.athleteId));
+  athletes.forEach(athlete => {
+    const person = document.createElement("label"); person.className = `attendance-person${present.has(athlete.id) ? " checked" : ""}`;
+    const check = document.createElement("input"); check.type = "checkbox"; check.checked = present.has(athlete.id); check.setAttribute("aria-label", `${athlete.name} present`);
+    const name = document.createElement("span"); name.textContent = athlete.name;
+    check.addEventListener("change", async () => {
+      check.disabled = true;
+      state.attendance = state.attendance.filter(record => !(record.date === date && record.athleteId === athlete.id));
+      if (check.checked) state.attendance.push({date, group: attendanceGroup, athleteId: athlete.id, checkedAt: new Date().toISOString()});
+      person.classList.toggle("checked", check.checked);
+      const count = athletes.filter(item => state.attendance.some(record => record.date === date && record.group === attendanceGroup && record.athleteId === item.id)).length;
+      $("#attendance-count").textContent = `${count} / ${athletes.length} present`;
+      try {
+        await saveAttendance(date, attendanceGroup, athlete.id, check.checked);
+        $("#save-status").textContent = `Attendance saved · ${new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}`;
+      } catch (error) {
+        await loadState(); renderAttendance(); $("#save-status").textContent = "Attendance save failed — board reloaded"; console.error(error);
+      } finally {
+        check.disabled = false;
+      }
+    });
+    person.append(check, name); grid.append(person);
+  });
+  if (!athletes.length) { const empty = document.createElement("div"); empty.className = "attendance-empty"; empty.textContent = "No athletes are assigned to this group."; grid.append(empty); }
+  $("#attendance-count").textContent = `${present.size} / ${athletes.length} present`;
+  $$('[data-attendance-group]').forEach(button => button.classList.toggle("active", button.dataset.attendanceGroup === attendanceGroup));
+}
+
 function renderAll() {
-  renderSide(); renderDashboard(); setupAssignInputs(); renderAssignments(); renderLiftManager(); renderResults(); renderReview(); renderRoster(); renderNewAthleteSports(); renderToday(); updateClock();
+  renderSide(); renderDashboard(); setupAssignInputs(); renderAssignments(); renderLiftManager(); renderResults(); renderReview(); renderRosterSetup(); renderRoster(); renderNewAthleteSports(); renderToday(); renderAttendance(); updateClock();
 }
 
 function bindEvents() {
   setupNavigation();
   $("#refresh").addEventListener("click", renderAll); $("#a-group").addEventListener("change", refreshAssignSports); $("#assign-workout").addEventListener("click", assignWorkout);
   $("#manage-lifts").addEventListener("click", () => $("#lift-manager").hidden = !$("#lift-manager").hidden); $("#close-lifts").addEventListener("click", () => $("#lift-manager").hidden = true);
+  $("#open-lifts").addEventListener("click", event => { event.stopPropagation(); toggleLiftDropdown(); });
+  $("#a-lift").addEventListener("keydown", event => { if (event.key === "ArrowDown" && $("#lift-dropdown").hidden) { event.preventDefault(); toggleLiftDropdown(true); } if (event.key === "Escape") toggleLiftDropdown(false); });
+  document.addEventListener("click", event => { if (!event.target.closest(".lift-picker")) toggleLiftDropdown(false); });
   ["#r-assignment", "#r-sport", "#r-status"].forEach(id => $(id).addEventListener("change", renderResults)); $("#save-results").addEventListener("click", saveResults);
   $("#lock-session").addEventListener("click", async () => { const a = state.assignments.find(x => x.id === $("#r-assignment").value); if (a) { a.locked = !a.locked; await saveState(); renderAll(); } });
   ["#v-group", "#v-sport", "#v-lift", "#v-status"].forEach(id => $(id).addEventListener("change", renderReview));
   $("#approve-visible").addEventListener("click", async () => { const visible = renderReview().filter(s => s.status === "pending"); visible.forEach(s => { const input = $(`[data-manual="${CSS.escape(s.id)}"]`); s.manualMax = Number(input?.value || s.suggestedMax); s.status = "approved"; const athlete = state.athletes.find(a => a.id === s.athleteId); if (athlete) { athlete.maxes ||= {}; athlete.maxes[s.lift] = s.manualMax; } }); await saveState(); renderAll(); });
   $("#add-athlete").addEventListener("click", () => $("#athlete-form").hidden = !$("#athlete-form").hidden); $("#save-athlete").addEventListener("click", addAthlete);
+  $("#add-class").addEventListener("click", addClassGroup); $("#add-sport").addEventListener("click", addSport); $("#add-sub").addEventListener("click", addSportGroup); $("#sub-sport").addEventListener("change", renderRosterSetup);
   $("#edit-roster").addEventListener("click", () => { rosterEditing = !rosterEditing; selectedAthletes.clear(); $("#edit-roster").textContent = rosterEditing ? "Done editing" : "Edit roster"; renderRoster(); });
-  $("#remove-athletes").addEventListener("click", removeSelectedAthletes); $("#select-all").addEventListener("change", event => { const sport = $("#f-sport").value, group = $("#f-class").value, query = $("#f-search").value.trim().toLowerCase(); state.athletes.filter(a => (sport === "all" || a.sports.includes(sport)) && (group === "all" || a.classGroup === group) && (!query || a.name.toLowerCase().includes(query))).forEach(a => event.target.checked ? selectedAthletes.add(a.id) : selectedAthletes.delete(a.id)); renderRoster(); });
-  ["#f-sport", "#f-class"].forEach(id => $(id).addEventListener("change", renderRoster)); $("#f-search").addEventListener("input", renderRoster);
+  $("#remove-athletes").addEventListener("click", removeSelectedAthletes); $("#select-all").addEventListener("change", event => { visibleRosterAthletes().forEach(a => event.target.checked ? selectedAthletes.add(a.id) : selectedAthletes.delete(a.id)); renderRoster(); $("#select-all").checked = event.target.checked; });
+  $("#f-sport").addEventListener("change", () => { $("#f-sub").value = "all"; selectedAthletes.clear(); renderRoster(); }); ["#f-class", "#f-sub"].forEach(id => $(id).addEventListener("change", () => { selectedAthletes.clear(); renderRoster(); })); $("#f-search").addEventListener("input", renderRoster);
   $("#tv-date").addEventListener("change", renderToday); $("#tv-refresh").addEventListener("click", renderToday);
+  $("#attendance-date").value = today(); $("#attendance-date").addEventListener("change", renderAttendance);
+  $$('[data-attendance-group]').forEach(button => button.addEventListener("click", () => { attendanceGroup = button.dataset.attendanceGroup; renderAttendance(); }));
   $$('[data-tv-mode]').forEach(button => button.addEventListener("click", () => { tvMode = button.dataset.tvMode; $$('[data-tv-mode]').forEach(b => b.classList.toggle("active", b === button)); renderToday(); }));
   $("#tv-fullscreen").addEventListener("click", async () => { const panel = $('[data-panel="today"]'); document.fullscreenElement ? await document.exitFullscreen() : await panel.requestFullscreen(); });
   document.addEventListener("fullscreenchange", () => { const panel = $('[data-panel="today"]'); panel.classList.toggle("tv-board-full", Boolean(document.fullscreenElement)); $("#tv-fullscreen").textContent = document.fullscreenElement ? "Exit TV mode" : "Enter TV mode"; });
   setInterval(updateClock, 30000);
+  window.addEventListener("resize", renderAttendance);
 }
 
 loadState().then(() => { $("#tv-date").value = today(); bindEvents(); renderAll(); app.hidden = false; $("#save-status").textContent = "Encrypted server data loaded"; }).catch(() => { fatal.hidden = false; });
-

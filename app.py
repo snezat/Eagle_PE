@@ -13,7 +13,7 @@ from flask import Flask, abort, g, jsonify, redirect, render_template, request, 
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from db import Database, utcnow
+from db import Database, StateConflictError, utcnow
 from security import FieldCipher, ensure_setup_token, new_secret_key
 
 
@@ -21,6 +21,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     base = Path(__file__).resolve().parent
     instance = Path(os.environ.get("ARC_INSTANCE_PATH", base / "instance")).resolve()
     instance.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(instance, 0o700)
     app = Flask(__name__, instance_path=str(instance), instance_relative_config=True)
     secure_cookies = os.environ.get("ARC_SECURE_COOKIES", "1") != "0"
     app.config.update(
@@ -40,6 +42,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         app.config.update(test_config)
 
     proxy_count = int(os.environ.get("ARC_PROXY_COUNT", "0"))
+    if not 0 <= proxy_count <= 5:
+        raise RuntimeError("ARC_PROXY_COUNT must be between 0 and 5")
     if proxy_count:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=proxy_count, x_proto=proxy_count, x_host=proxy_count)
 
@@ -51,7 +55,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     dummy_password_hash = generate_password_hash(secrets.token_urlsafe(32), method="scrypt")
     if not db.admin_count():
         token = ensure_setup_token(instance)
-        logging.getLogger(__name__).warning("FIRST START: administrator setup token: %s", token)
+        if os.environ.get("ARC_TERMINAL_SETUP") != "1":
+            logging.getLogger(__name__).warning("FIRST START: administrator setup token: %s", token)
 
     @app.before_request
     def security_gate():
@@ -61,13 +66,15 @@ def create_app(test_config: dict | None = None) -> Flask:
         if sid:
             sid_hash = cipher.digest(sid)
             now = datetime.now(timezone.utc)
-            with db.connect() as conn:
+            with db.connection() as conn:
                 row = conn.execute("""SELECT s.*,a.is_active FROM server_sessions s JOIN admins a ON a.id=s.admin_id
                     WHERE s.id_hash=?""", (sid_hash,)).fetchone()
                 if row:
                     expires = datetime.fromisoformat(row["expires_at"])
                     agent_ok = secrets.compare_digest(row["user_agent_hash"], cipher.digest(request.user_agent.string or ""))
-                    if expires > now and row["is_active"] and agent_ok:
+                    csrf_value = session.get("csrf", "")
+                    csrf_ok = bool(csrf_value) and secrets.compare_digest(row["csrf_hash"], cipher.digest(csrf_value))
+                    if expires > now and row["is_active"] and agent_ok and csrf_ok:
                         g.admin = row["admin_id"]
                         g.session_id = sid_hash
                         if (now - datetime.fromisoformat(row["last_seen_at"])).total_seconds() > 300:
@@ -83,7 +90,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.after_request
     def harden(response):
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
             "connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'self'"
         )
@@ -91,7 +98,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
-        if request.path == "/app" or request.path.startswith("/api/"):
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        if request.path in {"/", "/app", "/login", "/setup"} or request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store, max-age=0"
             response.headers["Pragma"] = "no-cache"
         if request.is_secure:
@@ -142,7 +151,9 @@ def create_app(test_config: dict | None = None) -> Flask:
             error = "The one-time setup token is not valid."
         if error:
             return render_template("setup.html", csrf=csrf_token(), error=error, username=username), 400
-        with db.connect() as conn:
+        with db.transaction() as conn:
+            if conn.execute("SELECT count(*) FROM admins").fetchone()[0]:
+                abort(409, "Administrator setup has already been completed")
             cursor = conn.execute("INSERT INTO admins(username_lookup,username_enc,password_hash,created_at) VALUES(?,?,?,?)", (
                 cipher.lookup(username), cipher.encrypt(username), generate_password_hash(password, method="scrypt"), utcnow()
             ))
@@ -160,20 +171,20 @@ def create_app(test_config: dict | None = None) -> Flask:
         password = request.form.get("password", "")
         lookup = cipher.digest(f"{request.remote_addr or 'unknown'}|{username.casefold()}")
         cutoff = int(time.time()) - 15 * 60
-        with db.connect() as conn:
+        with db.connection() as conn:
             conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (int(time.time()) - 86400,))
             attempts = conn.execute("SELECT count(*) FROM login_attempts WHERE lookup_hash=? AND attempted_at>=? AND succeeded=0", (lookup, cutoff)).fetchone()[0]
             row = conn.execute("SELECT * FROM admins WHERE username_lookup=? AND is_active=1", (cipher.lookup(username),)).fetchone()
         password_ok = check_password_hash(row["password_hash"] if row else dummy_password_hash, password)
         if attempts >= 5 or not row or not password_ok:
-            with db.connect() as conn:
+            with db.connection() as conn:
                 conn.execute("INSERT INTO login_attempts(lookup_hash,attempted_at,succeeded) VALUES(?,?,0)", (lookup, int(time.time())))
             db.audit("login_failed", None, client_hash(), "Invalid login")
             time.sleep(0.35)
             status = 429 if attempts >= 5 else 401
             error = "Too many attempts. Try again in 15 minutes." if status == 429 else "The username or password is not correct."
             return render_template("login.html", csrf=csrf_token(), error=error, username=username), status
-        with db.connect() as conn:
+        with db.connection() as conn:
             conn.execute("UPDATE admins SET last_login_at=? WHERE id=?", (utcnow(), row["id"]))
             conn.execute("DELETE FROM login_attempts WHERE lookup_hash=?", (lookup,))
         _start_session(db, cipher, row["id"])
@@ -184,7 +195,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     def logout():
         admin_id = g.admin
         if g.session_id:
-            with db.connect() as conn:
+            with db.connection() as conn:
                 conn.execute("DELETE FROM server_sessions WHERE id_hash=?", (g.session_id,))
         session.clear()
         if admin_id:
@@ -208,18 +219,42 @@ def create_app(test_config: dict | None = None) -> Flask:
         if payload is None:
             return jsonify({"error": "A JSON body is required"}), 400
         try:
-            db.replace_state(payload)
+            revision = payload.get("revision")
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+                raise ValueError("A valid state revision is required")
+            new_revision = db.replace_state(payload, revision)
+        except StateConflictError as exc:
+            return jsonify({"error": "Planner data changed on another screen. Reload and try again.", "revision": exc.current_revision}), 409
         except (ValueError, TypeError, KeyError) as exc:
             return jsonify({"error": str(exc)}), 400
         db.audit("state_updated", g.admin, client_hash(), "Planner data saved")
-        return jsonify({"ok": True, "savedAt": utcnow()})
+        return jsonify({"ok": True, "savedAt": utcnow(), "revision": new_revision})
+
+    @app.put("/api/attendance")
+    @login_required
+    def api_attendance_update():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("present"), bool):
+            return jsonify({"error": "A valid attendance update is required"}), 400
+        try:
+            revision = db.set_attendance(
+                str(payload.get("date", "")),
+                str(payload.get("group", "")),
+                str(payload.get("athleteId", "")),
+                payload["present"],
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True, "revision": revision})
 
     @app.get("/healthz")
+    @login_required
     def health():
         return jsonify({"status": "ok"})
 
     @app.errorhandler(400)
     @app.errorhandler(404)
+    @app.errorhandler(409)
     @app.errorhandler(413)
     @app.errorhandler(500)
     def error_page(error):
@@ -238,7 +273,7 @@ def _start_session(db: Database, cipher: FieldCipher, admin_id: int) -> None:
     csrf = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     expires = now + timedelta(hours=int(os.environ.get("ARC_SESSION_HOURS", "12")))
-    with db.connect() as conn:
+    with db.connection() as conn:
         conn.execute("DELETE FROM server_sessions WHERE expires_at < ?", (now.isoformat(),))
         conn.execute("INSERT INTO server_sessions(id_hash,admin_id,csrf_hash,created_at,last_seen_at,expires_at,user_agent_hash) VALUES(?,?,?,?,?,?,?)", (
             cipher.digest(sid), admin_id, cipher.digest(csrf), now.isoformat(), now.isoformat(), expires.isoformat(),

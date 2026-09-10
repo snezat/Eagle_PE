@@ -1,31 +1,71 @@
 #!/bin/sh
 set -eu
+umask 077
 
 # Change this to 1 before starting when you want to replace the administrator
 # username and password. Change it back to 0 after the reset succeeds.
 # This updates only the administrator account; roster and training data remain intact.
 RESET_ADMIN_CREDENTIALS=0
+SETUP_ADMIN_ONLY=0
+CLI_RESET_REQUESTED=0
 
-# Gunicorn listens on every network interface by default. For an internet-facing
-# installation, put Caddy/Nginx in front and set LISTEN_ADDRESS=127.0.0.1:8000.
-LISTEN_ADDRESS="${LISTEN_ADDRESS:-0.0.0.0:8000}"
-WORKERS="${ARC_WORKERS:-2}"
-THREADS="${ARC_THREADS:-4}"
+case "${1:-}" in
+    --reset-admin)
+        RESET_ADMIN_CREDENTIALS=1
+        SETUP_ADMIN_ONLY=1
+        CLI_RESET_REQUESTED=1
+        ;;
+    --setup-admin-only)
+        SETUP_ADMIN_ONLY=1
+        ;;
+    "") ;;
+    *)
+        echo "Usage: $0 [--reset-admin]" >&2
+        exit 2
+        ;;
+esac
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$script_dir"
 
+# /root cannot be traversed by the unprivileged service account. On the common
+# Proxmox-LXC first-run path, transparently install into the protected production
+# locations instead of ever running Gunicorn as root.
+if [ "$(id -u)" -eq 0 ]; then
+    case "$script_dir" in
+        /root|/root/*)
+            if [ -f "$script_dir/deploy/install-lxc.sh" ]; then
+                echo "Installing Arc Strength from $script_dir into the LXC production paths…"
+                sh "$script_dir/deploy/install-lxc.sh" "$script_dir"
+                if [ "$CLI_RESET_REQUESTED" = "1" ]; then
+                    exec sh /opt/arc-strength/start.sh --reset-admin
+                fi
+                exit 0
+            fi
+            ;;
+    esac
+fi
+
 # Optional owner-controlled configuration. Do not put a username or password here.
-if [ -f "$script_dir/.env" ]; then
+if [ "$script_dir" = "/opt/arc-strength" ] && [ -f /etc/arc-strength.env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . /etc/arc-strength.env
+    set +a
+elif [ -f "$script_dir/.env" ]; then
     set -a
     # shellcheck disable=SC1091
     . "$script_dir/.env"
     set +a
 fi
 
-if [ "${1:-}" = "--reset-admin" ]; then
-    RESET_ADMIN_CREDENTIALS=1
-fi
+# Gunicorn listens on every network interface by default. For an internet-facing
+# installation, put Caddy/Nginx in front and set LISTEN_ADDRESS=127.0.0.1:8000.
+# These defaults are evaluated after .env is loaded so ARC_WORKERS/ARC_THREADS
+# from that file take effect.
+LISTEN_ADDRESS="${LISTEN_ADDRESS:-0.0.0.0:8000}"
+WORKERS="${ARC_WORKERS:-2}"
+THREADS="${ARC_THREADS:-4}"
 
 install_python() {
     if [ "$(id -u)" -ne 0 ]; then
@@ -107,11 +147,12 @@ if [ "$ARC_SECURE_COOKIES" != "1" ]; then
 fi
 
 export ARC_RESET_ADMIN="$RESET_ADMIN_CREDENTIALS"
+export ARC_TERMINAL_SETUP=1
 "$python" - <<'PY'
-import getpass
 import os
 import secrets
 import sys
+import termios
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash
@@ -126,20 +167,47 @@ reset_requested = os.environ.get("ARC_RESET_ADMIN") == "1"
 admin_exists = db.admin_count() > 0
 
 if not admin_exists or reset_requested:
-    if not sys.stdin.isatty() and not Path("/dev/tty").exists():
-        raise SystemExit("An interactive terminal is required to create or reset administrator credentials.")
-    tty = open("/dev/tty", "r+", encoding="utf-8", buffering=1)
+    try:
+        tty = open("/dev/tty", "r+", encoding="utf-8", buffering=1)
+    except OSError as exc:
+        raise SystemExit("An interactive terminal is required to create or reset administrator credentials.") from exc
+
+    def read_line(prompt: str) -> str:
+        tty.write(prompt)
+        tty.flush()
+        value = tty.readline()
+        if value == "":
+            raise SystemExit("Administrator setup was cancelled because the terminal closed.")
+        return value.rstrip("\r\n")
+
+    def read_secret(prompt: str) -> str:
+        tty.write(prompt)
+        tty.flush()
+        fd = tty.fileno()
+        original = termios.tcgetattr(fd)
+        hidden = original.copy()
+        hidden[3] &= ~termios.ECHO
+        try:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, hidden)
+            value = tty.readline()
+        finally:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, original)
+            tty.write("\n")
+            tty.flush()
+        if value == "":
+            raise SystemExit("Administrator setup was cancelled because the terminal closed.")
+        return value.rstrip("\r\n")
+
     action = "Reset" if admin_exists else "Create"
     tty.write(f"\n{action} Arc Strength administrator credentials\n")
     while True:
-        tty.write("Administrator username: ")
-        username = tty.readline().strip()
+        username = read_line("Administrator username: ").strip()
         if 3 <= len(username) <= 80:
             break
         tty.write("Username must be 3–80 characters.\n")
     while True:
-        password = getpass.getpass("Passphrase (at least 15 characters): ", stream=tty)
-        confirmation = getpass.getpass("Confirm passphrase: ", stream=tty)
+        password = read_secret("Passphrase (at least 15 characters): ")
+        confirmation = read_secret("Confirm passphrase: ")
         if len(password) < 15:
             tty.write("Passphrase must be at least 15 characters.\n")
         elif len(password) > 128:
@@ -175,11 +243,21 @@ if [ "$RESET_ADMIN_CREDENTIALS" = "1" ]; then
     echo "Credential reset complete. Set RESET_ADMIN_CREDENTIALS back to 0 in start.sh before the next start."
 fi
 
+if [ "$SETUP_ADMIN_ONLY" = "1" ]; then
+    exit 0
+fi
+
 echo "Starting Arc Strength on $LISTEN_ADDRESS"
 echo "Trusted hosts: $ARC_TRUSTED_HOSTS"
 if [ "$(id -u)" -eq 0 ] && command -v runuser >/dev/null 2>&1; then
     id arcstrength >/dev/null 2>&1 || useradd --system --home "$ARC_INSTANCE_PATH" --shell /usr/sbin/nologin arcstrength
     chown -R arcstrength:arcstrength "$ARC_INSTANCE_PATH" "$venv"
+    if ! runuser -u arcstrength -- test -r "$script_dir/wsgi.py" -a -x "$script_dir"; then
+        echo "Refusing to run Gunicorn as root, and the arcstrength service account cannot read $script_dir." >&2
+        echo "This commonly happens when the project is under /root. Move it to /opt/arc-strength," >&2
+        echo "or run: sh '$script_dir/deploy/install-lxc.sh' '$script_dir'" >&2
+        exit 1
+    fi
     exec runuser -u arcstrength -- env \
         ARC_ENV="$ARC_ENV" \
         ARC_INSTANCE_PATH="$ARC_INSTANCE_PATH" \

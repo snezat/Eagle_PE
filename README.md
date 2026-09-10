@@ -12,32 +12,41 @@ Secure Flask edition of the Athletic PE strength-planning app for a private LXC 
 - Sessions are checked against a server-side session table, bound to the browser user-agent, expire after 12 hours by default, and use `Secure`, `HttpOnly`, `SameSite=Strict` cookies.
 - State-changing requests require a CSRF token. Login attempts are throttled. Responses use CSP, clickjacking, MIME-sniffing, referrer, permissions, cache-control, and HSTS protections.
 - The browser keeps decrypted planner state only in memory while the authenticated page is open. It does not put roster data or credentials in localStorage/sessionStorage.
+- Whole-planner saves use an optimistic revision check so an older browser cannot silently overwrite newer server data. Attendance taps use a narrow atomic endpoint so several sign-in screens can be used safely.
 
 Field encryption does not hide non-sensitive relational metadata such as internal IDs, dates, group IDs, set counts, or percentages. Protect the LXC host and encrypted key files; anyone who steals both the database and keys can decrypt the records.
 
-## LXC deployment
+## Ubuntu 26.04 LXC deployment
 
-Use an unprivileged Debian 12 or Ubuntu 24.04 LXC. Give it a static LAN address and keep port 8000 private.
+Use an **unprivileged Ubuntu Server 26.04 LTS LXC** in Proxmox. Give it a static LAN address, allow enough memory for the OS plus Gunicorn, and keep application port 8000 private. The installer uses Ubuntu's current `python3` package and a private virtual environment, so it does not depend on a hard-coded Python minor version.
 
-1. Copy this directory to the LXC.
-2. Run `sudo sh deploy/install-lxc.sh /path/to/arc-strength-webapp`.
+1. Copy this directory to the LXC. It may initially be under `/root`; the installer copies application code to `/opt/arc-strength` and private data to `/var/lib/arc-strength`.
+2. From this directory, run `bash start.sh` as root. When the source is below `/root`, the launcher automatically invokes the LXC installer, places code in `/opt/arc-strength`, places private data in `/var/lib/arc-strength`, and prompts for the first administrator through `/dev/tty`. Running `sh deploy/install-lxc.sh "$PWD"` directly performs the same installation.
 3. Edit `/etc/arc-strength.env`:
-   - set `ARC_TRUSTED_HOSTS` to the real DNS name and/or LAN IP;
+   - replace `strength.example.com` in `ARC_TRUSTED_HOSTS` with the real DNS name or internal hostname;
    - leave `ARC_SECURE_COOKIES=1` for HTTPS;
    - leave `ARC_PROXY_COUNT=1` when Caddy is the only reverse proxy.
-4. Replace the hostname in `deploy/Caddyfile`, install it at `/etc/caddy/Caddyfile`, and reload Caddy.
-5. Restart the app with `systemctl restart arc-strength`.
-6. Open the HTTPS URL. Retrieve the one-time token with `journalctl -u arc-strength -n 30 --no-pager`, then create the administrator account.
+4. Replace the hostname in `deploy/Caddyfile`, then run `install -m 0644 deploy/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy`.
+5. Restart the app with `systemctl restart arc-strength` and check it with `systemctl status arc-strength --no-pager`.
+6. Open the HTTPS URL and sign in with the terminal-created administrator. For a noninteractive installation, retrieve the one-time token with `journalctl -u arc-strength -n 30 --no-pager`, then create the administrator account in the browser. After setup, the token file is deleted.
+
+For a public DNS name, point its A/AAAA record at the network edge and forward only ports 80 and 443 to Caddy. For LAN-only use, use an internal hostname with `tls internal` in the Caddy site block and install Caddy's local CA certificate on the coach computer and weight-room display. Never forward port 8000.
 
 ## Simple terminal launcher
 
-For a direct terminal-managed installation, run `chmod +x start.sh` once and then `./start.sh`. It checks Python, creates `.venv`, installs missing or changed dependencies, creates the encrypted database and keys, prompts for the initial administrator username and hidden passphrase, and starts Gunicorn.
+For a direct terminal-managed installation, run `chmod +x start.sh` once and then `./start.sh`. It checks Python, creates `.venv`, installs missing or changed dependencies, creates the encrypted database and keys, prompts through `/dev/tty` for the initial administrator username and hidden passphrase, and starts Gunicorn.
+
+When run as root below `/root`, `start.sh` automatically switches to the hardened LXC installation because the unprivileged service account cannot safely traverse `/root`. In other locations it drops foreground Gunicorn to the `arcstrength` account. It never runs Gunicorn as root.
 
 Optional configuration is loaded from `.env`. Do not put the administrator password in that file. For an HTTPS reverse proxy, set `ARC_SECURE_COOKIES=1`, `ARC_PROXY_COUNT=1`, `LISTEN_ADDRESS=127.0.0.1:8000`, and the real hostname in `ARC_TRUSTED_HOSTS`.
 
-To change administrator credentials without changing roster or workout data, either run `./start.sh --reset-admin`, or temporarily change `RESET_ADMIN_CREDENTIALS=0` near the top of `start.sh` to `1`. After a successful reset, return it to `0`. Existing sessions are signed out; the database, encryption keys, athletes, assignments, prescriptions, results, and max history are preserved.
+To change administrator credentials without changing roster or workout data, run `/opt/arc-strength/start.sh --reset-admin` as root on an installed LXC, or temporarily change `RESET_ADMIN_CREDENTIALS=0` near the top of `start.sh` to `1`. The command-only reset exits after saving the credentials; restart the service with `systemctl restart arc-strength`. After a file-setting reset, return it to `0`. Existing sessions are signed out; the database, encryption keys, athletes, assignments, prescriptions, results, and max history are preserved.
 
 For LAN-only use without public DNS, use a trusted internal TLS certificate or Caddy's internal CA. Do not expose the Flask/Gunicorn port directly to the internet.
+
+## Standalone/server parity
+
+The Flask edition is the production source of truth and now includes the standalone app's weight-room display, single-group TV layout, sport color coding, priority stars, attendance board, grouped/deletable assignments, editable lift library, roster filtering, multi-sport membership, class groups, and sport-specific training groups. `../AGENTS.md` records the parity and privacy rules for future work.
 
 ## Importing the existing roster
 
@@ -53,7 +62,7 @@ Run `sudo sh scripts/backup.sh /secure/backup/location`. The backup includes enc
 
 ## Development
 
-Create a virtual environment, install `requirements-dev.txt`, set `ARC_SECURE_COOKIES=0`, and run `python app.py`. The development server listens only on `127.0.0.1:8000`. Run `pytest` for the authentication, privacy-header, and CSRF checks.
+Create a virtual environment, install `requirements-dev.txt`, set `ARC_SECURE_COOKIES=0`, and run `python app.py`. The development server listens only on `127.0.0.1:8000`. Run `pytest` for authentication, privacy headers, CSRF, revision conflicts, atomic attendance, input validation, startup guards, and UI parity checks.
 
 ## Operational checklist
 

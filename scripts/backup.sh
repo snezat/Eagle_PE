@@ -8,5 +8,7 @@ sqlite3 "$data_dir/arc-strength.sqlite3" ".backup '$backup_dir/$stamp/arc-streng
 install -m 0600 "$data_dir/master.key" "$backup_dir/$stamp/master.key"
 install -m 0600 "$data_dir/lookup.key" "$backup_dir/$stamp/lookup.key"
 install -m 0600 "$data_dir/flask-secret.key" "$backup_dir/$stamp/flask-secret.key"
+if [ -f "$data_dir/old-master.keys" ]; then
+  install -m 0600 "$data_dir/old-master.keys" "$backup_dir/$stamp/old-master.keys"
+fi
 echo "Backup created at $backup_dir/$stamp. Store this directory securely; it contains decryption keys."
-

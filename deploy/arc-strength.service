@@ -8,19 +8,35 @@ User=arcstrength
 Group=arcstrength
 WorkingDirectory=/opt/arc-strength
 EnvironmentFile=/etc/arc-strength.env
-ExecStart=/opt/arc-strength/.venv/bin/gunicorn --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - wsgi:app
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/arc-strength/.venv/bin/gunicorn --workers ${ARC_WORKERS} --threads ${ARC_THREADS} --timeout 60 --bind ${LISTEN_ADDRESS} --access-logfile - --error-logfile - wsgi:app
 Restart=on-failure
 RestartSec=3
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/arc-strength
 RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
-

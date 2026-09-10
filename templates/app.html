@@ -23,11 +23,11 @@
       <aside>
         <nav aria-label="Planner sections">
           <button data-view="today" aria-selected="true">Today’s workout</button>
-          <button data-view="dashboard">Dashboard</button>
+          <button data-view="attendance">Attendance</button>
           <button data-view="assign">Assign lift</button>
           <button data-view="results">Log results</button>
-          <button data-view="review">Max review</button>
           <button data-view="roster">Roster & groups</button>
+          <button data-view="dashboard">Dashboard</button>
         </nav>
         <div class="aside-title">Athletic PE organization</div>
         <div id="side-groups"></div>
@@ -48,6 +48,19 @@
           <div class="tv-grid" id="tv-groups"></div>
         </section>
 
+        <section data-panel="attendance" hidden>
+          <div class="attendance-head">
+            <div><h1>Attendance board</h1><p>Tap a name once as each athlete enters the weight room.</p></div>
+            <label>Date<input id="attendance-date" type="date"></label>
+            <div class="segmented attendance-groups" aria-label="Attendance group">
+              <button class="btn active" data-attendance-group="Nonfootball Group A">Group A</button>
+              <button class="btn" data-attendance-group="Nonfootball Group B">Group B</button>
+            </div>
+            <strong class="attendance-count" id="attendance-count">0 / 0 present</strong>
+          </div>
+          <div class="attendance-grid" id="attendance-grid"></div>
+        </section>
+
         <section data-panel="dashboard" hidden>
           <div class="heading"><div><h1>Coach dashboard</h1><p>Completion, missing data, and max decisions across Athletic PE.</p></div><button class="btn" id="refresh">Refresh</button></div>
           <div class="stats"><article><span>Submitted results</span><strong id="d-submitted">0/0</strong></article><article><span>Pending suggestions</span><strong id="d-pending">0</strong></article><article><span>Missing results</span><strong id="d-missing">0</strong></article><article><span>Missing starting maxes</span><strong id="d-max">0</strong></article></div>
@@ -58,7 +71,7 @@
           <div class="heading"><div><h1>Assign lift module</h1><p>Assign once; calculate individual loads for the selected group.</p></div></div>
           <article class="card"><div class="form-grid">
             <label>Class group<select id="a-group"></select></label><label>Sport filter<select id="a-sport"></select></label><label>Date<input id="a-date" type="date"></label>
-            <label>Lift<input id="a-lift" list="lifts" autocomplete="off"><datalist id="lifts"></datalist><button class="btn mini" id="manage-lifts" type="button">Manage lift list</button></label>
+            <label>Lift<div class="lift-picker"><input id="a-lift" autocomplete="off" placeholder="Choose or type a new lift"><button type="button" id="open-lifts" aria-label="Show all saved lifts" aria-expanded="false">▾</button><div class="lift-dropdown" id="lift-dropdown" hidden></div></div><datalist id="lifts"></datalist><button class="btn mini" id="manage-lifts" type="button">Manage lift list</button></label>
             <label>Percentage<input id="a-percent" type="number" min="1" max="100" value="75"></label><label>Sets<input id="a-sets" type="number" min="1" value="2"></label><label>Base reps<input id="a-reps" type="number" min="1" value="5"></label><label>Expected burnout reps<input id="a-expected" type="number" min="1" value="8"></label>
             <label class="wide">Notes<textarea id="a-notes" rows="2" maxlength="2000"></textarea></label><button class="btn primary" id="assign-workout">Assign to group</button>
           </div><div class="message" id="a-message"></div></article>
@@ -81,9 +94,14 @@
         <section data-panel="roster" hidden>
           <div class="heading"><div><h1>Roster & group setup</h1><p>Student records are encrypted in the server database.</p></div><div><button class="btn" id="add-athlete">Add athlete</button><button class="btn" id="edit-roster">Edit roster</button></div></div>
           <article class="card" id="athlete-form" hidden><div class="form-grid"><label>Name<input id="new-name" maxlength="200"></label><label>Grade<input id="new-grade" maxlength="20"></label><label>Teacher<input id="new-teacher" maxlength="100"></label><label>Class group<select id="new-group"></select></label><fieldset class="wide"><legend>Sports</legend><div class="checks" id="new-sports"></div></fieldset><button class="btn primary" id="save-athlete">Save athlete</button></div></article>
-          <div class="toolbar"><label>Sport<select id="f-sport"></select></label><label>Class group<select id="f-class"></select></label><label>Search<input id="f-search" type="search" placeholder="Athlete name"></label><button class="btn danger push" id="remove-athletes" hidden>Remove selected</button></div>
+          <div class="cards three roster-setup">
+            <article class="card"><h2>Class groups</h2><div class="compact-add"><input id="new-class" maxlength="100" placeholder="New class group"><button class="btn" id="add-class" type="button">Add</button></div><div class="chips" id="class-options"></div></article>
+            <article class="card"><h2>Sports</h2><div class="compact-add"><input id="new-sport" maxlength="100" placeholder="New sport"><button class="btn" id="add-sport" type="button">Add</button></div><div class="chips" id="sport-options"></div></article>
+            <article class="card"><h2>Sport training groups</h2><div class="compact-add subgroup-add"><select id="sub-sport" aria-label="Sport for new training group"></select><input id="new-sub" maxlength="100" placeholder="e.g. Linemen"><button class="btn" id="add-sub" type="button">Add</button></div><div class="chips" id="sub-options"></div></article>
+          </div>
+          <div class="toolbar"><label>Sport<select id="f-sport"></select></label><label>Class group<select id="f-class"></select></label><label>Sport training group<select id="f-sub"></select></label><label>Search<input id="f-search" type="search" placeholder="Athlete name"></label><button class="btn danger push" id="remove-athletes" hidden>Remove selected</button></div>
           <div class="heading small"><h2 id="roster-title">All athletes</h2><span id="roster-count"></span></div>
-          <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Class group</th><th>Sports</th><th>Projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
+          <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Class group</th><th>Sports</th><th>Sport training groups</th><th>Projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
         </section>
       </main>
     </div>
@@ -91,4 +109,3 @@
   <div class="fatal" id="fatal" hidden><h1>Unable to load the planner</h1><p>Your session may have expired. Sign in again.</p><a class="btn primary" href="/">Return to sign in</a></div>
 </body>
 </html>
-
