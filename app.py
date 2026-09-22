@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import platform
 import secrets
+import shutil
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -46,6 +50,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         SESSION_COOKIE_SAMESITE="Strict",
         PERMANENT_SESSION_LIFETIME=timedelta(hours=session_hours),
         DATABASE=os.environ.get("ARC_DATABASE_PATH", str(instance / "arc-strength.sqlite3")),
+        UPDATE_TRIGGER_PATH=str(instance / "update-request"),
+        UPDATE_STATUS_PATH=str(instance / "update-status.json"),
+        UPDATER_ENABLED=(os.name != "nt" and Path("/etc/systemd/system/arc-strength-update.path").is_file()),
     )
     hosts = [x.strip() for x in os.environ.get("ARC_TRUSTED_HOSTS", "localhost,127.0.0.1").split(",") if x.strip()]
     if hosts == ["*"] and os.environ.get("ARC_ENV", "production") == "production":
@@ -65,6 +72,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.extensions["arc_db"] = db
     app.extensions["arc_cipher"] = cipher
     dummy_password_hash = generate_password_hash(secrets.token_urlsafe(32), method="scrypt")
+    process_started_at = datetime.now(timezone.utc)
+    process_started_monotonic = time.monotonic()
     if not db.admin_count():
         token = ensure_setup_token(instance)
         if os.environ.get("ARC_TERMINAL_SETUP") != "1":
@@ -259,6 +268,165 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"error": str(exc)}), 400
         return jsonify({"ok": True, "revision": revision})
 
+    @app.get("/api/app-settings")
+    @login_required
+    def app_settings():
+        with db.connection() as conn:
+            rows = conn.execute(
+                "SELECT id,username_enc,is_active,created_at,last_login_at FROM admins ORDER BY id"
+            ).fetchall()
+            database_health = conn.execute("PRAGMA quick_check").fetchone()[0]
+        users = [{
+            "id": row["id"],
+            "username": cipher.decrypt(row["username_enc"]),
+            "active": bool(row["is_active"]),
+            "createdAt": row["created_at"],
+            "lastLoginAt": row["last_login_at"],
+            "current": row["id"] == g.admin,
+        } for row in rows]
+        database_path = Path(app.config["DATABASE"])
+        disk = shutil.disk_usage(instance)
+        update_status = _read_update_status(Path(app.config["UPDATE_STATUS_PATH"]))
+        if Path(app.config["UPDATE_TRIGGER_PATH"]).exists() and update_status.get("state") not in {"queued", "running"}:
+            update_status = {"state": "queued", "message": "The update request is waiting for the secure updater."}
+        return jsonify({
+            "health": {
+                "status": "healthy" if database_health == "ok" else "degraded",
+                "database": database_health,
+                "databaseBytes": database_path.stat().st_size if database_path.exists() else 0,
+                "diskFreeBytes": disk.free,
+                "diskTotalBytes": disk.total,
+                "pythonVersion": platform.python_version(),
+                "operatingSystem": f"{platform.system()} {platform.release()}",
+                "processStartedAt": process_started_at.isoformat(),
+                "processUptimeSeconds": int(time.monotonic() - process_started_monotonic),
+                "serverTime": utcnow(),
+            },
+            "users": users,
+            "update": {
+                "available": bool(app.config["UPDATER_ENABLED"]),
+                **update_status,
+            },
+        })
+
+    @app.put("/api/app-settings/users/<int:user_id>/password")
+    @login_required
+    def reset_user_password(user_id: int):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON object is required"}), 400
+        password = payload.get("password", "")
+        confirm = payload.get("confirmPassword", "")
+        if not isinstance(password, str) or not isinstance(confirm, str):
+            return jsonify({"error": "A valid password is required"}), 400
+        with db.transaction() as conn:
+            target = conn.execute("SELECT username_enc FROM admins WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                return jsonify({"error": "User not found"}), 404
+            username = cipher.decrypt(target["username_enc"])
+            error = _validate_credentials(username, password, confirm)
+            if error:
+                return jsonify({"error": error}), 400
+            conn.execute(
+                "UPDATE admins SET password_hash=? WHERE id=?",
+                (generate_password_hash(password, method="scrypt"), user_id),
+            )
+            if user_id == g.admin and g.session_id:
+                conn.execute("DELETE FROM server_sessions WHERE admin_id=? AND id_hash<>?", (user_id, g.session_id))
+            else:
+                conn.execute("DELETE FROM server_sessions WHERE admin_id=?", (user_id,))
+        db.audit("admin_password_reset", g.admin, client_hash(), f"Password reset for user id {user_id}")
+        return jsonify({"ok": True})
+
+    @app.post("/api/app-settings/users")
+    @login_required
+    def create_user():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON object is required"}), 400
+        username = payload.get("username", "")
+        password = payload.get("password", "")
+        confirm = payload.get("confirmPassword", "")
+        if not all(isinstance(value, str) for value in (username, password, confirm)):
+            return jsonify({"error": "Valid account details are required"}), 400
+        username = username.strip()
+        error = _validate_credentials(username, password, confirm)
+        if error:
+            return jsonify({"error": error}), 400
+        try:
+            with db.transaction() as conn:
+                cursor = conn.execute(
+                    "INSERT INTO admins(username_lookup,username_enc,password_hash,created_at) VALUES(?,?,?,?)",
+                    (
+                        cipher.lookup(username),
+                        cipher.encrypt(username),
+                        generate_password_hash(password, method="scrypt"),
+                        utcnow(),
+                    ),
+                )
+                user_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "A user with that username already exists"}), 409
+        db.audit("admin_created", g.admin, client_hash(), f"Created user id {user_id}")
+        return jsonify({"ok": True, "id": user_id}), 201
+
+    @app.patch("/api/app-settings/users/<int:user_id>/lock")
+    @login_required
+    def set_user_lock(user_id: int):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON object is required"}), 400
+        locked = payload.get("locked")
+        if not isinstance(locked, bool):
+            return jsonify({"error": "A valid lock state is required"}), 400
+        if user_id == g.admin and locked:
+            return jsonify({"error": "You cannot lock the account you are currently using"}), 409
+        with db.transaction() as conn:
+            target = conn.execute("SELECT id FROM admins WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                return jsonify({"error": "User not found"}), 404
+            conn.execute("UPDATE admins SET is_active=? WHERE id=?", (0 if locked else 1, user_id))
+            if locked:
+                conn.execute("DELETE FROM server_sessions WHERE admin_id=?", (user_id,))
+        event = "admin_locked" if locked else "admin_unlocked"
+        db.audit(event, g.admin, client_hash(), f"Account state changed for user id {user_id}")
+        return jsonify({"ok": True})
+
+    @app.delete("/api/app-settings/users/<int:user_id>")
+    @login_required
+    def delete_user(user_id: int):
+        if user_id == g.admin:
+            return jsonify({"error": "You cannot delete the account you are currently using"}), 409
+        with db.transaction() as conn:
+            target = conn.execute("SELECT id FROM admins WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                return jsonify({"error": "User not found"}), 404
+            if conn.execute("SELECT count(*) FROM admins").fetchone()[0] <= 1:
+                return jsonify({"error": "The final user account cannot be deleted"}), 409
+            conn.execute("DELETE FROM admins WHERE id=?", (user_id,))
+        db.audit("admin_deleted", g.admin, client_hash(), f"Deleted user id {user_id}")
+        return jsonify({"ok": True})
+
+    @app.post("/api/app-update")
+    @login_required
+    def request_app_update():
+        if not app.config["UPDATER_ENABLED"]:
+            return jsonify({"error": "Server updates are not configured on this installation"}), 503
+        trigger = Path(app.config["UPDATE_TRIGGER_PATH"])
+        request_record = json.dumps({"requestedAt": utcnow(), "requestedBy": g.admin}) + "\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(trigger, flags, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(request_record)
+        except FileExistsError:
+            return jsonify({"error": "An update is already queued or running"}), 409
+        except OSError:
+            logging.getLogger(__name__).exception("Unable to create the protected update request")
+            return jsonify({"error": "The server could not queue the update request"}), 503
+        db.audit("app_update_requested", g.admin, client_hash(), "Server update requested from App Settings")
+        return jsonify({"ok": True, "state": "queued"}), 202
+
     @app.get("/healthz")
     @login_required
     def health():
@@ -306,6 +474,20 @@ def _validate_credentials(username: str, password: str, confirm: str) -> str | N
     if password != confirm:
         return "The passwords do not match."
     return None
+
+
+def _read_update_status(path: Path) -> dict:
+    default = {"state": "idle", "message": "No update has been run from the app yet."}
+    try:
+        if not path.is_file() or path.stat().st_size > 64 * 1024:
+            return default
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {"state": "unknown", "message": "Update status is temporarily unavailable."}
+    if not isinstance(value, dict):
+        return default
+    allowed = {"state", "phase", "message", "requestedAt", "startedAt", "completedAt", "version"}
+    return {key: value[key] for key in allowed if isinstance(value.get(key), (str, int, float, bool))}
 
 
 if __name__ == "__main__":

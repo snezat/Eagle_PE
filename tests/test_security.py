@@ -147,3 +147,81 @@ def test_invalid_state_is_rejected_without_losing_data(tmp_path, monkeypatch):
     unchanged = client.get("/api/state").get_json()
     assert unchanged["athletes"] == []
     assert unchanged["revision"] == 0
+
+
+def test_app_settings_health_user_controls_and_update_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
+    monkeypatch.setenv("ARC_SECURE_COOKIES", "0")
+    trigger = tmp_path / "update-request"
+    app = create_app({
+        "TESTING": True,
+        "TRUSTED_HOSTS": ["localhost"],
+        "UPDATER_ENABLED": True,
+        "UPDATE_TRIGGER_PATH": str(trigger),
+        "UPDATE_STATUS_PATH": str(tmp_path / "update-status.json"),
+    })
+    client = app.test_client()
+    assert client.get("/api/app-settings").status_code == 401
+    landing = client.get("/")
+    csrf = token_from(landing.get_data(as_text=True))
+    setup_token = (tmp_path / "setup-token").read_text().strip()
+    client.post("/setup", data={
+        "csrf_token": csrf,
+        "setup_token": setup_token,
+        "username": "head-coach",
+        "password": "correct horse battery staple",
+        "confirm_password": "correct horse battery staple",
+    })
+    csrf = token_from(client.get("/app").get_data(as_text=True))
+    headers = {"X-CSRF-Token": csrf}
+    assert client.post("/api/app-settings/users", json={
+        "username": "assistant-coach",
+        "password": "initial assistant password",
+        "confirmPassword": "initial assistant password",
+    }).status_code == 400
+    created = client.post("/api/app-settings/users", json={
+        "username": "assistant-coach",
+        "password": "initial assistant password",
+        "confirmPassword": "initial assistant password",
+    }, headers=headers)
+    assert created.status_code == 201
+    assistant_id = created.get_json()["id"]
+    assert client.post("/api/app-settings/users", json={
+        "username": "assistant-coach",
+        "password": "another assistant password",
+        "confirmPassword": "another assistant password",
+    }, headers=headers).status_code == 409
+
+    settings = client.get("/api/app-settings")
+    assert settings.status_code == 200
+    payload = settings.get_json()
+    assert payload["health"]["status"] == "healthy"
+    assert payload["health"]["database"] == "ok"
+    assert payload["update"]["available"] is True
+    assert [user["username"] for user in payload["users"]] == ["head-coach", "assistant-coach"]
+    current_id = next(user["id"] for user in payload["users"] if user["current"])
+
+    locked = client.patch(
+        f"/api/app-settings/users/{assistant_id}/lock",
+        json={"locked": True},
+        headers=headers,
+    )
+    assert locked.status_code == 200
+    assert next(user for user in client.get("/api/app-settings").get_json()["users"] if user["id"] == assistant_id)["active"] is False
+    assert client.patch(
+        f"/api/app-settings/users/{current_id}/lock", json={"locked": True}, headers=headers
+    ).status_code == 409
+
+    reset = client.put(
+        f"/api/app-settings/users/{assistant_id}/password",
+        json={"password": "new assistant passphrase", "confirmPassword": "new assistant passphrase"},
+        headers=headers,
+    )
+    assert reset.status_code == 200
+    assert client.delete(f"/api/app-settings/users/{current_id}", headers=headers).status_code == 409
+    assert client.delete(f"/api/app-settings/users/{assistant_id}", headers=headers).status_code == 200
+
+    update = client.post("/api/app-update", json={}, headers=headers)
+    assert update.status_code == 202
+    assert trigger.is_file()
+    assert client.post("/api/app-update", json={}, headers=headers).status_code == 409

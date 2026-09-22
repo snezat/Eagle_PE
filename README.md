@@ -46,6 +46,12 @@ For stronger LAN privacy, use a trusted internal TLS certificate or Caddy's inte
 
 The Flask edition is the production source of truth and now includes the standalone app's weight-room display, single-group TV layout, sport color coding, priority stars, attendance board, grouped/deletable assignments, editable lift library, roster filtering, multi-sport membership, class groups, and sport-specific training groups. `../AGENTS.md` records the parity and privacy rules for future work.
 
+## App Settings and one-click updates
+
+Signed-in coaches can open **App Settings** to view database, process, storage, and server health; create coach accounts; reset coach passwords; and lock, unlock, or delete other coach accounts. The active account cannot lock or delete itself. Password changes close the affected account's other sessions, and locking an account signs it out immediately.
+
+The production installer also enables a root-owned systemd update monitor. The web process can only place a fixed update-request file in `/var/lib/arc-strength`; it cannot run arbitrary commands or write application code. The separate updater downloads `main` from `https://github.com/snezat/Eagle_PE.git`, creates a rollback copy, updates application files and Python dependencies, runs startup checks, restarts the service, and restores the previous files if the new version fails its health check. Existing servers must run the installer containing this feature once from the console before the button becomes available. A root administrator can override the repository or branch in `/etc/arc-strength.env` with `ARC_UPDATE_REPOSITORY` and `ARC_UPDATE_BRANCH`.
+
 ## Importing the existing roster
 
 The handoff directory's private `instance` database already contains the migrated roster in encrypted form. The installer copies that database and its key files on a fresh server, but never overwrites an existing server database. Alternatively, import from the original roster seed before entering new records:

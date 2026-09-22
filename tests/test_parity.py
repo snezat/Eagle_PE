@@ -13,6 +13,7 @@ def test_server_ui_keeps_standalone_feature_parity():
     required_template_ids = {
         "tv-groups", "attendance-grid", "assignments", "lift-dropdown", "lift-options",
         "roster", "class-options", "sport-options", "sub-options", "f-sub",
+        "settings-users", "add-settings-user", "run-update", "health-status", "password-dialog",
     }
     for element_id in required_template_ids:
         assert f'id="{element_id}"' in template
@@ -42,6 +43,9 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     installer = (ROOT / "deploy" / "install-lxc.sh").read_text(encoding="utf-8")
     backup = (ROOT / "scripts" / "backup.sh").read_text(encoding="utf-8")
     service = (ROOT / "deploy" / "arc-strength.service").read_text(encoding="utf-8")
+    update_service = (ROOT / "deploy" / "arc-strength-update.service").read_text(encoding="utf-8")
+    update_path = (ROOT / "deploy" / "arc-strength-update.path").read_text(encoding="utf-8")
+    updater = (ROOT / "scripts" / "update-app.sh").read_text(encoding="utf-8")
     assert "termios.tcgetattr" in start
     assert "getpass.getpass" not in start
     assert 'os.open("/dev/tty", os.O_RDWR' in start
@@ -74,6 +78,14 @@ def test_startup_and_lxc_files_have_required_safety_guards():
     assert "systemctl restart arc-strength" in installer
     assert "User=arcstrength" in service
     assert "NoNewPrivileges=true" in service
+    assert "arc-strength-update.path" in installer
+    assert "PathExists=/var/lib/arc-strength/update-request" in update_path
+    assert "User=root" in update_service
+    assert "NoNewPrivileges=true" in update_service
+    assert "git -C \"$source_target\" fetch" in updater
+    assert "pip install --requirement" in updater
+    assert "systemctl restart arc-strength" in updater
+    assert "rollback_application" in updater
     assert (ROOT / ".env.example").is_file()
 
 
