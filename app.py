@@ -294,6 +294,19 @@ def create_app(test_config: dict | None = None) -> Flask:
         db.audit("student_lift_logged", None, client_hash(), f"student:{g.student['id']} prescription:{prescription_id[:100]}")
         return jsonify({"ok": True, **result})
 
+    @app.put("/api/student/maxes")
+    @student_required
+    def student_update_maxes():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("maxes"), dict):
+            return jsonify({"error": "A maxes object is required"}), 400
+        try:
+            maxes = db.set_student_maxes(g.student["athlete_id"], payload["maxes"])
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        db.audit("student_maxes_updated", None, client_hash(), f"student:{g.student['id']} lifts:{','.join(payload['maxes'])}")
+        return jsonify({"ok": True, "maxes": maxes})
+
     @app.put("/api/student/sports")
     @student_required
     def student_update_sports():

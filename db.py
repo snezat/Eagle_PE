@@ -413,7 +413,14 @@ class Database:
                     "notes": self.cipher.decrypt(row["assignment_notes_enc"]) or "",
                 }
             items = [serialize(row) for row in rows]
-            lifts = sorted(set(actual) | set(projected))
+            lift_setting = conn.execute(
+                "SELECT value_enc FROM app_settings WHERE setting_key='liftLibrary'"
+            ).fetchone()
+            configured_lifts = json.loads(self.cipher.decrypt(lift_setting["value_enc"]) or "[]") if lift_setting else []
+            if not configured_lifts:
+                configured_lifts = ["Bench", "Back Squat", "Power Clean"]
+            known_lifts = set(actual) | set(projected) | {item["lift"] for item in items}
+            lifts = list(dict.fromkeys([*configured_lifts, *sorted(known_lifts - set(configured_lifts))]))
             return {
                 "athlete": {
                     "name": self.cipher.decrypt(athlete["name_enc"]),
@@ -425,6 +432,66 @@ class Database:
                 "today": [item for item in items if item["date"] == workout_date],
                 "history": [item for item in items if item["submitted"]][:50],
             }
+
+    def set_student_maxes(self, athlete_id: str, maxes: dict[str, Any]) -> dict[str, float]:
+        if not isinstance(maxes, dict) or len(maxes) > 200:
+            raise ValueError("Maxes must be an object")
+        updates: dict[str, float | None] = {}
+        for raw_lift, value in maxes.items():
+            if not isinstance(raw_lift, str):
+                raise ValueError("Each lift must have a valid name")
+            lift = raw_lift.strip()
+            if not lift or len(lift) > 200 or lift != raw_lift:
+                raise ValueError("Each lift must have a valid name")
+            if value is None or value == "":
+                updates[lift] = None
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"Enter a valid recorded max for {lift}")
+            if value <= 0 or value > 5000:
+                raise ValueError(f"Recorded max for {lift} must be between 1 and 5,000 lb")
+            updates[lift] = math.floor(float(value) / 5 + 0.5) * 5
+
+        now = utcnow()
+        with self.transaction() as conn:
+            athlete = conn.execute(
+                "SELECT maxes_enc,projected_maxes_enc,overrides_enc FROM athletes WHERE id=?",
+                (athlete_id,),
+            ).fetchone()
+            if not athlete:
+                raise ValueError("Student account is not linked to an athlete")
+            actual = json.loads(self.cipher.decrypt(athlete["maxes_enc"]) or "{}")
+            projected = json.loads(self.cipher.decrypt(athlete["projected_maxes_enc"]) or "{}") if athlete["projected_maxes_enc"] else {}
+            overrides = json.loads(self.cipher.decrypt(athlete["overrides_enc"]) or "{}")
+            for lift, value in updates.items():
+                if value is None:
+                    actual.pop(lift, None)
+                else:
+                    actual[lift] = value
+            conn.execute(
+                "UPDATE athletes SET maxes_enc=?,updated_at=? WHERE id=?",
+                (self.cipher.encrypt(json.dumps(actual, separators=(",", ":"))), now, athlete_id),
+            )
+
+            if updates:
+                rows = conn.execute(
+                    """SELECT p.id,p.lift_enc,a.percent FROM prescriptions p
+                       JOIN assignments a ON a.id=p.assignment_id
+                       WHERE p.athlete_id=? AND p.submitted=0 AND p.is_override=0""",
+                    (athlete_id,),
+                ).fetchall()
+                for row in rows:
+                    lift = self.cipher.decrypt(row["lift_enc"])
+                    if lift not in updates:
+                        continue
+                    max_value = overrides.get(lift) or projected.get(lift) or actual.get(lift)
+                    load = math.floor(float(max_value) * row["percent"] / 100 / 5 + 0.5) * 5 if max_value else None
+                    conn.execute(
+                        "UPDATE prescriptions SET projected_max=?,prescribed_load=? WHERE id=?",
+                        (max_value, load, row["id"]),
+                    )
+                conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
+            return actual
 
     def set_student_sports(self, athlete_id: str, sports: list[str], effective_date: str) -> list[str]:
         if not isinstance(sports, list) or len(sports) > 100 or any(not isinstance(name, str) for name in sports):
@@ -679,6 +746,7 @@ class Database:
             athletes = state.get("athletes", [])
             name_to_id = {}
             valid_athlete_ids = set()
+            athlete_data_by_id = {}
             for i, athlete in enumerate(athletes):
                 athlete_id = str(athlete.get("id") or f"athlete-{i+1}")[:80]
                 name = str(athlete.get("name", "")).strip()
@@ -686,6 +754,7 @@ class Database:
                     continue
                 name_to_id[name] = athlete_id
                 valid_athlete_ids.add(athlete_id)
+                athlete_data_by_id[athlete_id] = athlete
                 conn.execute("""INSERT INTO athletes(id,name_enc,name_lookup,grade_enc,teacher_enc,class_group_id,subgroup_enc,maxes_enc,projected_maxes_enc,overrides_enc,created_at,updated_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     athlete_id, self.cipher.encrypt(name), self.cipher.lookup(name), self.cipher.encrypt(athlete.get("grade", "")),
@@ -701,6 +770,7 @@ class Database:
                             athlete_id, sport_ids[sport], self.cipher.encrypt(group_by_sport.get(sport, ""))
                         ))
             assignment_ids = set()
+            assignment_data_by_id = {}
             for record in state.get("attendance", []):
                 athlete_id = str(record.get("athleteId", ""))[:80]
                 group = record.get("group")
@@ -716,6 +786,7 @@ class Database:
                 if not aid:
                     continue
                 assignment_ids.add(aid)
+                assignment_data_by_id[aid] = a
                 conn.execute("""INSERT INTO assignments(id,class_group_id,sport_id,assigned_date,lift_enc,percent,sets_count,reps,expected_reps,notes_enc,locked,priority,created_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     aid, group_ids[a["group"]], sport_ids.get(a.get("sport")), a.get("date"), self.cipher.encrypt(a.get("lift", "")),
@@ -731,10 +802,26 @@ class Database:
                 if not pid:
                     continue
                 prescription_ids.add(pid)
+                projected_max = _number(p.get("projectedMaxUsed"))
+                prescribed_load = _number(p.get("prescribedLoad"))
+                if not p.get("submitted") and not p.get("isIndividualOverride"):
+                    athlete_data = athlete_data_by_id[athlete_id]
+                    lift = p.get("lift", "")
+                    effective_max = (
+                        athlete_data.get("overrides", {}).get(lift)
+                        or athlete_data.get("projectedMaxes", {}).get(lift)
+                        or athlete_data.get("maxes", {}).get(lift)
+                    )
+                    projected_max = _number(effective_max)
+                    assignment = assignment_data_by_id.get(p.get("assignmentId"))
+                    prescribed_load = (
+                        math.floor(float(projected_max) * int(assignment["percent"]) / 100 / 5 + 0.5) * 5
+                        if projected_max and assignment else None
+                    )
                 conn.execute("""INSERT INTO prescriptions(id,assignment_id,athlete_id,lift_enc,projected_max,prescribed_load,sets_count,reps,expected_reps,completed_load,burnout_reps,note_enc,submitted,load_mismatch,needs_review,is_override)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    pid, p["assignmentId"], athlete_id, self.cipher.encrypt(p.get("lift", "")), _number(p.get("projectedMaxUsed")),
-                    _number(p.get("prescribedLoad")), int(p.get("sets", 1)), int(p.get("reps", 1)), int(p.get("expected", 1)),
+                    pid, p["assignmentId"], athlete_id, self.cipher.encrypt(p.get("lift", "")), projected_max,
+                    prescribed_load, int(p.get("sets", 1)), int(p.get("reps", 1)), int(p.get("expected", 1)),
                     _number(p.get("completedLoad")), _integer(p.get("burnoutReps")), self.cipher.encrypt(p.get("note", "")),
                     int(bool(p.get("submitted"))), int(bool(p.get("loadMismatch"))), int(bool(p.get("needsReview"))), int(bool(p.get("isIndividualOverride"))),
                 ))

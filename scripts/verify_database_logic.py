@@ -110,6 +110,17 @@ with tempfile.TemporaryDirectory() as directory:
     assert student is not None
     assert student["sports"] == {"available": ["Baseball"], "selected": ["Baseball"]}
     assert {item["lift"] for item in student["today"]} == {"Bench", "Back Squat", "Power Clean"}
+    assert database.set_student_maxes("student-test-athlete", {"Deadlift": 253})["Deadlift"] == 255
+    synced_student = database.get_student_dashboard("student-test-athlete", demo_date)
+    assert next(item for item in synced_student["maxes"] if item["lift"] == "Deadlift")["actual"] == 255
+    assert next(
+        athlete for athlete in database.get_state()["athletes"] if athlete["id"] == "student-test-athlete"
+    )["maxes"]["Deadlift"] == 255
+    coach_state = database.get_state()
+    next(athlete for athlete in coach_state["athletes"] if athlete["id"] == "student-test-athlete")["maxes"]["Deadlift"] = 315
+    database.replace_state(coach_state, coach_state["revision"])
+    coach_synced_student = database.get_student_dashboard("student-test-athlete", demo_date)
+    assert next(item for item in coach_synced_student["maxes"] if item["lift"] == "Deadlift")["actual"] == 315
     bench = next(item for item in student["today"] if item["lift"] == "Bench")
     result = database.log_student_lift("student-test-athlete", bench["id"], 12)
     assert result["projectedMax"] == 210
@@ -129,4 +140,4 @@ with tempfile.TemporaryDirectory() as directory:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-print(json.dumps({"databaseLogic": "ok", "revisionConflict": "ok", "atomicAttendance": "ok", "validation": "ok", "studentPortal": "ok", "studentAccounts": "ok"}))
+print(json.dumps({"databaseLogic": "ok", "revisionConflict": "ok", "atomicAttendance": "ok", "validation": "ok", "studentPortal": "ok", "studentAccounts": "ok", "studentMaxSync": "ok"}))

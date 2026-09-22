@@ -27,6 +27,8 @@ The account opens the mobile student portal at `/student`. Its home screen is po
 
 Every rostered athlete receives a student account automatically. The default username is the athlete's first and last name joined together, and the default password is the last name. Both are lowercase with spaces, accents, apostrophes, and other special characters removed. Duplicate usernames receive a numeric suffix. Coaches can view, edit, lock, and unlock these credentials from **App Settings → Student accounts**; editing credentials signs out any existing sessions for that student.
 
+Students can enter or correct recorded maxes from their **Maxes** tab. Student and coach edits update the same athlete record, and changed maxes recalculate affected unsubmitted prescriptions.
+
 ## Ubuntu 26.04 LXC deployment
 
 Use an **unprivileged Ubuntu Server 26.04 LTS LXC** in Proxmox. Give it a static LAN address, allow enough memory for the OS plus Gunicorn, and allow application port 8000 only from the trusted local network. The installer uses Ubuntu's current `python3` package and a private virtual environment, so it does not depend on a hard-coded Python minor version.
