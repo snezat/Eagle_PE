@@ -8,7 +8,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 fail() {
-  echo "Arc Strength installation failed: $*" >&2
+  echo "ARCA Strength installation failed: $*" >&2
   exit 1
 }
 
@@ -56,7 +56,7 @@ if [ -r /etc/os-release ]; then
   esac
 fi
 
-echo "Installing Arc Strength system prerequisites..."
+echo "Installing ARCA Strength system prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update || fail "apt-get update failed; verify the CT has DNS and internet access"
 apt-get install -y --no-install-recommends \
@@ -198,7 +198,7 @@ from pathlib import Path
 path = Path(sys.argv[1])
 detected_hosts = [item for item in sys.argv[2].split(",") if item]
 lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else [
-    "# Arc Strength settings for direct access on a trusted local network."
+    "# ARCA Strength settings for direct access on a trusted local network."
 ]
 
 existing = {}
@@ -280,10 +280,10 @@ chown -R arcstrength:arcstrength "$data_target"
 find "$data_target" -type d -exec chmod 0700 {} \;
 find "$data_target" -type f -exec chmod 0600 {} \;
 
-systemctl daemon-reload || fail "systemd could not reload the Arc Strength unit"
-systemctl enable arc-strength || fail "the Arc Strength service could not be enabled"
-systemctl enable --now arc-strength-update.path || fail "the Arc Strength update monitor could not be enabled"
-systemctl restart arc-strength || fail "the Arc Strength service could not be started"
+systemctl daemon-reload || fail "systemd could not reload the ARCA Strength unit"
+systemctl enable arc-strength || fail "the ARCA Strength service could not be enabled"
+systemctl enable --now arc-strength-update.path || fail "the ARCA Strength update monitor could not be enabled"
+systemctl restart arc-strength || fail "the ARCA Strength service could not be started"
 
 probe_application() {
   (
@@ -319,7 +319,7 @@ while [ "$attempt" -lt 20 ]; do
 done
 if [ "$service_ready" -ne 1 ]; then
   journalctl -u arc-strength -n 40 --no-pager >&2 || true
-  fail "the Arc Strength service did not become active"
+  fail "the ARCA Strength service did not become active"
 fi
 
 for required_key in master.key lookup.key flask-secret.key; do
@@ -331,9 +331,9 @@ database_check=$(sqlite3 "$target_database" "PRAGMA quick_check;") \
   || fail "SQLite could not validate the installed database"
 [ "$database_check" = "ok" ] || fail "SQLite integrity check failed: $database_check"
 
-echo "Arc Strength is installed for Ubuntu/Debian LXC operation."
+echo "ARCA Strength is installed for Ubuntu/Debian LXC operation."
 echo "The application service is active and returned a valid HTTP response."
-echo "Open Arc Strength from the trusted local network at: http://$lan_display_host:8000"
+echo "Open ARCA Strength from the trusted local network at: http://$lan_display_host:8000"
 echo "Do not expose port 8000 to the public internet."
 if [ -f "$data_target/setup-token" ]; then
   echo "Automated install detected. Read the one-time administrator token with:"

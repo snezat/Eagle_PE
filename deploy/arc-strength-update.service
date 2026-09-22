@@ -1,5 +1,5 @@
 [Unit]
-Description=Update Arc Strength from GitHub
+Description=Update ARCA Strength from GitHub
 After=network-online.target
 Wants=network-online.target
 
@@ -24,4 +24,3 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
-

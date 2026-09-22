@@ -386,12 +386,12 @@ async function assignWorkout() {
   state.assignments.push(assignment);
   const eligible = state.athletes.filter(a => a.classGroup === group && (sport === "all" || a.sports.includes(sport)));
   eligible.forEach(athlete => {
-    const max = Number(athlete.overrides?.[lift] || athlete.maxes?.[lift] || 0);
+    const max = Number(athlete.overrides?.[lift] || athlete.projectedMaxes?.[lift] || athlete.maxes?.[lift] || 0);
     state.prescriptions.push({id: uid(), assignmentId: assignment.id, athleteId: athlete.id, athleteName: athlete.name, group, sports: [...athlete.sports], lift, projectedMaxUsed: max || null, prescribedLoad: max ? round5(max * percent / 100) : null, sets, reps, expected, completedLoad: "", burnoutReps: "", note: "", submitted: false, loadMismatch: false, needsReview: false, isIndividualOverride: false});
   });
   if (!state.liftLibrary.some(name => name.toLowerCase() === lift.toLowerCase())) state.liftLibrary.push(lift);
   await saveState();
-  message("a-message", `Assigned ${lift} to ${eligible.length} athletes; ${eligible.filter(a => !a.maxes?.[lift]).length} need a starting max.`);
+  message("a-message", `Assigned ${lift} to ${eligible.length} athletes; ${eligible.filter(a => !a.projectedMaxes?.[lift] && !a.maxes?.[lift]).length} need a starting max.`);
   renderAll();
 }
 
@@ -472,7 +472,7 @@ async function saveResults() {
     p.loadMismatch = Boolean(p.submitted && p.prescribedLoad && Number(p.completedLoad) !== Number(p.prescribedLoad));
     p.needsReview = Boolean(p.loadMismatch || Number(p.burnoutReps) > p.expected + 15);
     if (!p.submitted) return;
-    const athlete = state.athletes.find(a => a.id === p.athleteId), oldMax = Number(athlete?.maxes?.[p.lift] || p.projectedMaxUsed || 0), suggested = round5(Number(p.completedLoad) * (1 + Number(p.burnoutReps) / 30));
+    const athlete = state.athletes.find(a => a.id === p.athleteId), oldMax = Number(athlete?.projectedMaxes?.[p.lift] || athlete?.maxes?.[p.lift] || p.projectedMaxUsed || 0), suggested = round5(Number(p.completedLoad) * (1 + Number(p.burnoutReps) / 30));
     const existing = state.suggestions.find(s => s.prescriptionId === p.id);
     const data = {id: existing?.id || uid(), prescriptionId: p.id, assignmentId: assignment.id, athleteId: p.athleteId, athleteName: p.athleteName, group: p.group, sports: p.sports, lift: p.lift, oldMax, burnoutReps: Number(p.burnoutReps), expected: p.expected, suggestedMax: suggested, manualMax: existing?.manualMax || suggested, extreme: Number(p.burnoutReps) > p.expected + 15, status: existing?.status || "pending"};
     existing ? Object.assign(existing, data) : state.suggestions.push(data);
@@ -503,7 +503,7 @@ async function decideSuggestion(id, status, manualMax) {
   suggestion.status = status; suggestion.manualMax = manualMax || suggestion.suggestedMax;
   if (status === "approved") {
     const athlete = state.athletes.find(a => a.id === suggestion.athleteId);
-    if (athlete) { athlete.maxes ||= {}; athlete.maxes[suggestion.lift] = suggestion.manualMax; }
+    if (athlete) { athlete.projectedMaxes ||= {}; athlete.projectedMaxes[suggestion.lift] = suggestion.manualMax; }
   }
   await saveState(); renderAll();
 }
@@ -537,7 +537,7 @@ function renderRoster() {
       const sports = document.createElement("div"); sports.className = "roster-sports"; (athlete.sports.length ? athlete.sports : ["No sport"]).forEach(value => { const tag = document.createElement("span"); tag.className = "badge"; tag.textContent = value; sports.append(tag); });
       const subgroups = document.createElement("div"); subgroups.className = "roster-subgroups"; athlete.sports.forEach(s => { const line = document.createElement("span"); line.textContent = `${s}: ${athlete.groupBySport?.[s] || "Unassigned"}`; subgroups.append(line); });
       row.append(cell(athlete.classGroup), cell(sports), cell(subgroups));
-      const values = Object.entries(athlete.maxes || {}).map(([lift, max]) => `${lift}: ${max}`).join(" · "); row.append(cell(values || "No starting maxes"));
+      const lifts = [...new Set([...Object.keys(athlete.maxes || {}), ...Object.keys(athlete.projectedMaxes || {})])]; const values = lifts.map(lift => `${lift}: ${athlete.maxes?.[lift] || "—"} actual / ${athlete.projectedMaxes?.[lift] || athlete.maxes?.[lift] || "—"} projected`).join(" · "); row.append(cell(values || "No starting maxes"));
     }
     body.append(row);
   });
@@ -694,7 +694,7 @@ function bindEvents() {
   ["#r-assignment", "#r-sport", "#r-status"].forEach(id => $(id).addEventListener("change", renderResults)); $("#save-results").addEventListener("click", saveResults);
   $("#lock-session").addEventListener("click", async () => { const a = state.assignments.find(x => x.id === $("#r-assignment").value); if (a) { a.locked = !a.locked; await saveState(); renderAll(); } });
   ["#v-group", "#v-sport", "#v-lift", "#v-status"].forEach(id => $(id).addEventListener("change", renderReview));
-  $("#approve-visible").addEventListener("click", async () => { const visible = renderReview().filter(s => s.status === "pending"); visible.forEach(s => { const input = $(`[data-manual="${CSS.escape(s.id)}"]`); s.manualMax = Number(input?.value || s.suggestedMax); s.status = "approved"; const athlete = state.athletes.find(a => a.id === s.athleteId); if (athlete) { athlete.maxes ||= {}; athlete.maxes[s.lift] = s.manualMax; } }); await saveState(); renderAll(); });
+  $("#approve-visible").addEventListener("click", async () => { const visible = renderReview().filter(s => s.status === "pending"); visible.forEach(s => { const input = $(`[data-manual="${CSS.escape(s.id)}"]`); s.manualMax = Number(input?.value || s.suggestedMax); s.status = "approved"; const athlete = state.athletes.find(a => a.id === s.athleteId); if (athlete) { athlete.projectedMaxes ||= {}; athlete.projectedMaxes[s.lift] = s.manualMax; } }); await saveState(); renderAll(); });
   $("#add-athlete").addEventListener("click", () => $("#athlete-form").hidden = !$("#athlete-form").hidden); $("#save-athlete").addEventListener("click", addAthlete);
   $("#add-class").addEventListener("click", addClassGroup); $("#add-sport").addEventListener("click", addSport); $("#add-sub").addEventListener("click", addSportGroup); $("#sub-sport").addEventListener("change", renderRosterSetup);
   $("#edit-roster").addEventListener("click", () => { rosterEditing = !rosterEditing; selectedAthletes.clear(); $("#edit-roster").textContent = rosterEditing ? "Done editing" : "Edit roster"; renderRoster(); });

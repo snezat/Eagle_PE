@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
   <meta name="csrf-token" content="{{ csrf }}">
-  <title>Arc Strength Athletic PE</title>
+  <title>ARCA Strength Athletic PE</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
   <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
 </head>
 <body>
   <div class="app-shell" id="app" hidden>
     <header class="topbar">
-      <div><span class="brand">Arc Strength</span><span class="brand-sub">Athletic PE</span></div>
+      <div><span class="brand">ARCA Strength</span><span class="brand-sub">Athletic PE</span></div>
       <div class="save-status" id="save-status" role="status">Loading secure data…</div>
       <form method="post" action="{{ url_for('logout') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -102,7 +102,7 @@
           </div>
           <div class="toolbar"><label>Sport<select id="f-sport"></select></label><label>Class group<select id="f-class"></select></label><label>Sport training group<select id="f-sub"></select></label><label>Search<input id="f-search" type="search" placeholder="Athlete name"></label><button class="btn danger push" id="remove-athletes" hidden>Remove selected</button></div>
           <div class="heading small"><h2 id="roster-title">All athletes</h2><span id="roster-count"></span></div>
-          <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Class group</th><th>Sports</th><th>Sport training groups</th><th>Projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
+          <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Class group</th><th>Sports</th><th>Sport training groups</th><th>Actual / projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
         </section>
 
         <section data-panel="settings" hidden>

@@ -1,5 +1,5 @@
 [Unit]
-Description=Watch for Arc Strength update requests
+Description=Watch for ARCA Strength update requests
 
 [Path]
 PathExists=/var/lib/arc-strength/update-request

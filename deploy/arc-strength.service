@@ -1,5 +1,5 @@
 [Unit]
-Description=Arc Strength Athletic PE
+Description=ARCA Strength Athletic PE
 After=network.target
 
 [Service]

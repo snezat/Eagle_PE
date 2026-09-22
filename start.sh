@@ -39,11 +39,11 @@ cd "$script_dir"
 if [ "$(id -u)" -eq 0 ] && [ "$script_dir" != "/opt/arc-strength" ]; then
     installer="$script_dir/deploy/install-lxc.sh"
     if [ ! -f "$installer" ]; then
-        echo "Arc Strength installation failed: deploy/install-lxc.sh is missing." >&2
+        echo "ARCA Strength installation failed: deploy/install-lxc.sh is missing." >&2
         echo "Copy the complete arc-strength-webapp directory to the CT, then run start.sh from that directory." >&2
         exit 1
     fi
-    echo "Installing Arc Strength from $script_dir into the LXC production paths…"
+    echo "Installing ARCA Strength from $script_dir into the LXC production paths…"
     if [ "$CLI_RESET_REQUESTED" = "1" ]; then
         ARC_INSTALL_RESET_ADMIN=1 sh "$installer" "$script_dir"
     else
@@ -115,7 +115,7 @@ pip="$venv/bin/pip"
 requirements="$script_dir/requirements.txt"
 stamp="$venv/.requirements.sha256"
 [ -f "$requirements" ] || {
-    echo "Arc Strength startup failed: $requirements is missing." >&2
+    echo "ARCA Strength startup failed: $requirements is missing." >&2
     exit 1
 }
 requirements_hash=$($python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$requirements")
@@ -212,7 +212,7 @@ if not admin_exists or reset_requested:
         return value
 
     action = "Reset" if admin_exists else "Create"
-    write_terminal(f"\n{action} Arc Strength administrator credentials\n")
+    write_terminal(f"\n{action} ARCA Strength administrator credentials\n")
     while True:
         username = read_line("Administrator username: ").strip()
         if 3 <= len(username) <= 80:
@@ -260,7 +260,7 @@ if [ "$SETUP_ADMIN_ONLY" = "1" ]; then
     exit 0
 fi
 
-echo "Starting Arc Strength on $LISTEN_ADDRESS"
+echo "Starting ARCA Strength on $LISTEN_ADDRESS"
 echo "Trusted hosts: $ARC_TRUSTED_HOSTS"
 if [ "$(id -u)" -eq 0 ]; then
     if ! command -v runuser >/dev/null 2>&1 || ! command -v useradd >/dev/null 2>&1; then

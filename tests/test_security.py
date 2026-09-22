@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from app import _validate_credentials, create_app
 from security import FieldCipher
+from werkzeug.security import generate_password_hash
 
 
 def token_from(html: str) -> str:
@@ -81,6 +83,88 @@ def test_csrf_required_for_state_update(tmp_path, monkeypatch):
     setup_token = (tmp_path / "setup-token").read_text().strip()
     client.post("/setup", data={"csrf_token": csrf, "setup_token": setup_token, "username": "coach", "password": "correct horse battery staple", "confirm_password": "correct horse battery staple"})
     assert client.put("/api/state", json={}).status_code == 400
+
+
+def test_student_login_is_scoped_and_burnout_updates_projected_max(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
+    monkeypatch.setenv("ARC_SECURE_COOKIES", "0")
+    app = create_app({"TESTING": True, "TRUSTED_HOSTS": ["localhost"]})
+    client = app.test_client()
+
+    landing = client.get("/")
+    setup_csrf = token_from(landing.get_data(as_text=True))
+    setup_token = (tmp_path / "setup-token").read_text().strip()
+    client.post("/setup", data={
+        "csrf_token": setup_csrf, "setup_token": setup_token, "username": "coach",
+        "password": "correct horse battery staple", "confirm_password": "correct horse battery staple",
+    })
+    coach_csrf = token_from(client.get("/app").get_data(as_text=True))
+    client.post("/logout", data={"csrf_token": coach_csrf})
+
+    database = app.extensions["arc_db"]
+    database.ensure_test_student(generate_password_hash("test", method="scrypt"))
+    workout_date = datetime.now().date().isoformat()
+    state = database.get_state()
+    state["sports"] = ["Football", "Baseball"]
+    state["sportGroups"] = {"Football": [], "Baseball": []}
+    test_athlete = next(athlete for athlete in state["athletes"] if athlete["id"] == "student-test-athlete")
+    for index, (lift, percent, load, expected) in enumerate([
+        ("Bench", 75, 150, 8), ("Back Squat", 75, 225, 8),
+        ("Power Clean", 65, 120, 8), ("Dumbbell Row", 60, 50, 10),
+    ], start=1):
+        assignment_id = f"student-test-assignment-{index}"
+        state["assignments"].append({
+            "id": assignment_id, "group": "Student Test Group", "sport": "Baseball" if lift == "Dumbbell Row" else "all", "date": workout_date,
+            "lift": lift, "percent": percent, "sets": 2, "reps": 5, "expected": expected,
+            "notes": "", "locked": False, "priority": False, "createdAt": index,
+        })
+        if lift != "Dumbbell Row":
+            state["prescriptions"].append({
+                "id": f"student-test-prescription-{index}", "assignmentId": assignment_id,
+                "athleteId": "student-test-athlete", "athleteName": "Student Test", "group": "Student Test Group",
+                "sports": [], "lift": lift, "projectedMaxUsed": test_athlete.get("projectedMaxes", {}).get(lift),
+                "prescribedLoad": load, "sets": 2, "reps": 5, "expected": expected, "completedLoad": "",
+                "burnoutReps": "", "note": "", "submitted": False, "loadMismatch": False,
+                "needsReview": False, "isIndividualOverride": False,
+            })
+    database.replace_state(state, state["revision"])
+    login_page = client.get("/")
+    login_csrf = token_from(login_page.get_data(as_text=True))
+    login = client.post("/login", data={"csrf_token": login_csrf, "username": "student", "password": "test"})
+    assert login.status_code == 302
+    assert login.headers["Location"].endswith("/student")
+    student_page = client.get("/student")
+    assert student_page.status_code == 200
+    assert client.get("/api/state").status_code == 401
+
+    dashboard = client.get(f"/api/student/dashboard?date={workout_date}").get_json()
+    assert dashboard["athlete"]["name"] == "Student Test"
+    assert dashboard["sports"] == {"available": ["Football", "Baseball"], "selected": []}
+    assert {item["lift"] for item in dashboard["today"]} == {"Bench", "Back Squat", "Power Clean"}
+    bench = next(item for item in dashboard["today"] if item["lift"] == "Bench")
+    student_csrf = token_from(student_page.get_data(as_text=True))
+    updated_sports = client.put(
+        "/api/student/sports", json={"sports": ["Baseball"], "date": workout_date},
+        headers={"X-CSRF-Token": student_csrf},
+    )
+    assert updated_sports.status_code == 200
+    dashboard = client.get(f"/api/student/dashboard?date={workout_date}").get_json()
+    assert dashboard["sports"]["selected"] == ["Baseball"]
+    assert {item["lift"] for item in dashboard["today"]} == {"Bench", "Back Squat", "Power Clean", "Dumbbell Row"}
+    row = next(item for item in dashboard["today"] if item["lift"] == "Dumbbell Row")
+    assert client.put(
+        f"/api/student/workouts/{row['id']}", json={"burnoutReps": 12},
+        headers={"X-CSRF-Token": student_csrf},
+    ).status_code == 400
+    logged = client.put(
+        f"/api/student/workouts/{bench['id']}", json={"burnoutReps": 12},
+        headers={"X-CSRF-Token": student_csrf},
+    )
+    assert logged.status_code == 200
+    assert logged.get_json()["projectedMax"] == 210
+    refreshed = client.get(f"/api/student/dashboard?date={workout_date}").get_json()
+    bench_max = next(item for item in refreshed["maxes"] if item["lift"] == "Bench")
+    assert bench_max == {"lift": "Bench", "actual": 200, "projected": 210}
 
 
 def test_revision_conflict_and_atomic_attendance(tmp_path, monkeypatch):

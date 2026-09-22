@@ -53,6 +53,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         UPDATE_TRIGGER_PATH=str(instance / "update-request"),
         UPDATE_STATUS_PATH=str(instance / "update-status.json"),
         UPDATER_ENABLED=(os.name != "nt" and Path("/etc/systemd/system/arc-strength-update.path").is_file()),
+        ENABLE_TEST_STUDENT=os.environ.get("ARC_ENABLE_TEST_STUDENT", "1") != "0",
     )
     hosts = [x.strip() for x in os.environ.get("ARC_TRUSTED_HOSTS", "localhost,127.0.0.1").split(",") if x.strip()]
     if hosts == ["*"] and os.environ.get("ARC_ENV", "production") == "production":
@@ -69,6 +70,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     cipher = FieldCipher(instance)
     db = Database(app.config["DATABASE"], cipher)
     db.initialize()
+    if app.config["ENABLE_TEST_STUDENT"] and not app.config.get("TESTING"):
+        db.ensure_test_student(generate_password_hash("test", method="scrypt"))
     app.extensions["arc_db"] = db
     app.extensions["arc_cipher"] = cipher
     dummy_password_hash = generate_password_hash(secrets.token_urlsafe(32), method="scrypt")
@@ -82,6 +85,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.before_request
     def security_gate():
         g.admin = None
+        g.student = None
         g.session_id = None
         sid = session.get("sid")
         if sid:
@@ -100,7 +104,20 @@ def create_app(test_config: dict | None = None) -> Flask:
                         g.session_id = sid_hash
                         if (now - datetime.fromisoformat(row["last_seen_at"])).total_seconds() > 300:
                             conn.execute("UPDATE server_sessions SET last_seen_at=? WHERE id_hash=?", (utcnow(), sid_hash))
-            if g.admin is None:
+                if not row:
+                    student_row = conn.execute("""SELECT s.*,a.is_active,a.athlete_id FROM student_sessions s
+                        JOIN student_accounts a ON a.id=s.student_id WHERE s.id_hash=?""", (sid_hash,)).fetchone()
+                    if student_row:
+                        expires = datetime.fromisoformat(student_row["expires_at"])
+                        agent_ok = secrets.compare_digest(student_row["user_agent_hash"], cipher.digest(request.user_agent.string or ""))
+                        csrf_value = session.get("csrf", "")
+                        csrf_ok = bool(csrf_value) and secrets.compare_digest(student_row["csrf_hash"], cipher.digest(csrf_value))
+                        if expires > now and student_row["is_active"] and agent_ok and csrf_ok:
+                            g.student = {"id": student_row["student_id"], "athlete_id": student_row["athlete_id"]}
+                            g.session_id = sid_hash
+                            if (now - datetime.fromisoformat(student_row["last_seen_at"])).total_seconds() > 300:
+                                conn.execute("UPDATE student_sessions SET last_seen_at=? WHERE id_hash=?", (utcnow(), sid_hash))
+            if g.admin is None and g.student is None:
                 session.clear()
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             supplied = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
@@ -121,7 +138,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-        if request.path in {"/", "/app", "/login", "/setup"} or request.path.startswith("/api/"):
+        if request.path in {"/", "/app", "/student", "/login", "/setup"} or request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store, max-age=0"
             response.headers["Pragma"] = "no-cache"
         if request.is_secure:
@@ -147,6 +164,16 @@ def create_app(test_config: dict | None = None) -> Flask:
             return view(*args, **kwargs)
         return wrapped
 
+    def student_required(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if g.student is None:
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "Student authentication required"}), 401
+                return redirect(url_for("index"))
+            return view(*args, **kwargs)
+        return wrapped
+
     def client_hash() -> str:
         return cipher.digest(request.remote_addr or "unknown")
 
@@ -154,6 +181,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     def index():
         if g.admin:
             return redirect(url_for("planner"))
+        if g.student:
+            return redirect(url_for("student_portal"))
         setup_required = db.admin_count() == 0
         return render_template("setup.html" if setup_required else "login.html", csrf=csrf_token())
 
@@ -196,8 +225,10 @@ def create_app(test_config: dict | None = None) -> Flask:
             conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (int(time.time()) - 86400,))
             attempts = conn.execute("SELECT count(*) FROM login_attempts WHERE lookup_hash=? AND attempted_at>=? AND succeeded=0", (lookup, cutoff)).fetchone()[0]
             row = conn.execute("SELECT * FROM admins WHERE username_lookup=? AND is_active=1", (cipher.lookup(username),)).fetchone()
-        password_ok = check_password_hash(row["password_hash"] if row else dummy_password_hash, password)
-        if attempts >= 5 or not row or not password_ok:
+            student_row = None if row else conn.execute("SELECT * FROM student_accounts WHERE username_lookup=? AND is_active=1", (cipher.lookup(username),)).fetchone()
+        account = row or student_row
+        password_ok = check_password_hash(account["password_hash"] if account else dummy_password_hash, password)
+        if attempts >= 5 or not account or not password_ok:
             with db.connection() as conn:
                 conn.execute("INSERT INTO login_attempts(lookup_hash,attempted_at,succeeded) VALUES(?,?,0)", (lookup, int(time.time())))
             db.audit("login_failed", None, client_hash(), "Invalid login")
@@ -206,11 +237,16 @@ def create_app(test_config: dict | None = None) -> Flask:
             error = "Too many attempts. Try again in 15 minutes." if status == 429 else "The username or password is not correct."
             return render_template("login.html", csrf=csrf_token(), error=error, username=username), status
         with db.connection() as conn:
-            conn.execute("UPDATE admins SET last_login_at=? WHERE id=?", (utcnow(), row["id"]))
+            table = "admins" if row else "student_accounts"
+            conn.execute(f"UPDATE {table} SET last_login_at=? WHERE id=?", (utcnow(), account["id"]))
             conn.execute("DELETE FROM login_attempts WHERE lookup_hash=?", (lookup,))
-        _start_session(db, cipher, row["id"])
-        db.audit("login_succeeded", row["id"], client_hash())
-        return redirect(url_for("planner"))
+        if row:
+            _start_session(db, cipher, row["id"])
+            db.audit("login_succeeded", row["id"], client_hash())
+            return redirect(url_for("planner"))
+        _start_student_session(db, cipher, student_row["id"])
+        db.audit("student_login_succeeded", None, client_hash(), f"student:{student_row['id']}")
+        return redirect(url_for("student_portal"))
 
     @app.post("/logout")
     def logout():
@@ -218,10 +254,59 @@ def create_app(test_config: dict | None = None) -> Flask:
         if g.session_id:
             with db.connection() as conn:
                 conn.execute("DELETE FROM server_sessions WHERE id_hash=?", (g.session_id,))
+                conn.execute("DELETE FROM student_sessions WHERE id_hash=?", (g.session_id,))
         session.clear()
         if admin_id:
             db.audit("logout", admin_id, client_hash())
         return redirect(url_for("index"))
+
+    @app.get("/student")
+    @student_required
+    def student_portal():
+        return render_template("student.html", csrf=csrf_token())
+
+    @app.get("/api/student/dashboard")
+    @student_required
+    def student_dashboard():
+        workout_date = request.args.get("date", "")
+        try:
+            if len(workout_date) != 10:
+                raise ValueError
+            datetime.fromisoformat(workout_date)
+        except ValueError:
+            return jsonify({"error": "A valid workout date is required"}), 400
+        payload = db.get_student_dashboard(g.student["athlete_id"], workout_date)
+        if payload is None:
+            return jsonify({"error": "Student account is not linked to an athlete"}), 404
+        return jsonify(payload)
+
+    @app.put("/api/student/workouts/<prescription_id>")
+    @student_required
+    def student_log_workout(prescription_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON body is required"}), 400
+        try:
+            result = db.log_student_lift(g.student["athlete_id"], prescription_id[:100], payload.get("burnoutReps"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        db.audit("student_lift_logged", None, client_hash(), f"student:{g.student['id']} prescription:{prescription_id[:100]}")
+        return jsonify({"ok": True, **result})
+
+    @app.put("/api/student/sports")
+    @student_required
+    def student_update_sports():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON body is required"}), 400
+        try:
+            selected = db.set_student_sports(
+                g.student["athlete_id"], payload.get("sports"), str(payload.get("date", ""))
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        db.audit("student_sports_updated", None, client_hash(), f"student:{g.student['id']} sports:{','.join(selected)}")
+        return jsonify({"ok": True, "sports": selected})
 
     @app.get("/app")
     @login_required
@@ -440,7 +525,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     def error_page(error):
         if request.path.startswith("/api/"):
             return jsonify({"error": getattr(error, "description", "Request failed")}), getattr(error, "code", 500)
-        if g.admin is None and getattr(error, "code", 500) == 404:
+        if g.admin is None and g.student is None and getattr(error, "code", 500) == 404:
             return redirect(url_for("index"))
         return render_template("error.html", code=getattr(error, "code", 500)), getattr(error, "code", 500)
 
@@ -459,6 +544,27 @@ def _start_session(db: Database, cipher: FieldCipher, admin_id: int) -> None:
             cipher.digest(sid), admin_id, cipher.digest(csrf), now.isoformat(), now.isoformat(), expires.isoformat(),
             cipher.digest(request.user_agent.string or ""),
         ))
+    session["sid"] = sid
+    session["csrf"] = csrf
+    session.permanent = True
+
+
+def _start_student_session(db: Database, cipher: FieldCipher, student_id: int) -> None:
+    session.clear()
+    sid = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now + current_app.permanent_session_lifetime
+    with db.connection() as conn:
+        conn.execute("DELETE FROM student_sessions WHERE expires_at < ?", (now.isoformat(),))
+        conn.execute(
+            """INSERT INTO student_sessions(id_hash,student_id,csrf_hash,created_at,last_seen_at,expires_at,user_agent_hash)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                cipher.digest(sid), student_id, cipher.digest(csrf), now.isoformat(), now.isoformat(), expires.isoformat(),
+                cipher.digest(request.user_agent.string or ""),
+            ),
+        )
     session["sid"] = sid
     session["csrf"] = csrf
     session.permanent = True

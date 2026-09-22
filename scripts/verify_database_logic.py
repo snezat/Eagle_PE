@@ -79,6 +79,35 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(database.get_state()["attendance"]) == 1
     assert database.set_attendance("2026-08-28", "Nonfootball Group A", "athlete-1", False) == 3
     assert database.get_state()["attendance"] == []
+    database.ensure_test_student("test-password-hash")
+    demo_date = __import__("datetime").datetime.now().date().isoformat()
+    with database.connection() as connection:
+        group_id = connection.execute("SELECT id FROM class_groups WHERE name='Student Test Group'").fetchone()[0]
+        for index, (lift, percent, load) in enumerate((("Bench", 75, 150), ("Back Squat", 75, 225), ("Power Clean", 65, 120)), start=1):
+            assignment_id = f"verify-student-assignment-{index}"
+            prescription_id = f"verify-student-prescription-{index}"
+            connection.execute(
+                """INSERT INTO assignments(id,class_group_id,sport_id,assigned_date,lift_enc,percent,sets_count,reps,expected_reps,notes_enc,locked,priority,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (assignment_id, group_id, None, demo_date, lift, percent, 2, 5, 8, "", 0, 0, index),
+            )
+            connection.execute(
+                """INSERT INTO prescriptions(id,assignment_id,athlete_id,lift_enc,projected_max,prescribed_load,sets_count,reps,expected_reps,completed_load,burnout_reps,note_enc,submitted,load_mismatch,needs_review,is_override)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (prescription_id, assignment_id, "student-test-athlete", lift, None, load, 2, 5, 8, None, None, "", 0, 0, 0, 0),
+            )
+    assert database.set_student_sports("student-test-athlete", ["Baseball"], demo_date) == ["Baseball"]
+    student = database.get_student_dashboard("student-test-athlete", demo_date)
+    assert student is not None
+    assert student["sports"] == {"available": ["Baseball"], "selected": ["Baseball"]}
+    assert {item["lift"] for item in student["today"]} == {"Bench", "Back Squat", "Power Clean"}
+    bench = next(item for item in student["today"] if item["lift"] == "Bench")
+    result = database.log_student_lift("student-test-athlete", bench["id"], 12)
+    assert result["projectedMax"] == 210
+    refreshed_student = database.get_student_dashboard("student-test-athlete", demo_date)
+    assert next(item for item in refreshed_student["maxes"] if item["lift"] == "Bench") == {
+        "lift": "Bench", "actual": 200, "projected": 210,
+    }
     invalid = sample_state()
     invalid["athletes"][0]["maxes"]["Bench"] = -10
     try:
@@ -91,4 +120,4 @@ with tempfile.TemporaryDirectory() as directory:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-print(json.dumps({"databaseLogic": "ok", "revisionConflict": "ok", "atomicAttendance": "ok", "validation": "ok"}))
+print(json.dumps({"databaseLogic": "ok", "revisionConflict": "ok", "atomicAttendance": "ok", "validation": "ok", "studentPortal": "ok"}))

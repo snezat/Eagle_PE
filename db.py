@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,25 @@ CREATE TABLE IF NOT EXISTS admins (
 CREATE TABLE IF NOT EXISTS server_sessions (
   id_hash TEXT PRIMARY KEY,
   admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+  csrf_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  user_agent_hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS student_accounts (
+  id INTEGER PRIMARY KEY,
+  athlete_id TEXT NOT NULL UNIQUE,
+  username_lookup TEXT NOT NULL UNIQUE,
+  username_enc BLOB NOT NULL,
+  password_hash TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+CREATE TABLE IF NOT EXISTS student_sessions (
+  id_hash TEXT PRIMARY KEY,
+  student_id INTEGER NOT NULL REFERENCES student_accounts(id) ON DELETE CASCADE,
   csrf_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
@@ -57,6 +77,7 @@ CREATE TABLE IF NOT EXISTS athletes (
   class_group_id INTEGER REFERENCES class_groups(id),
   subgroup_enc BLOB,
   maxes_enc BLOB NOT NULL,
+  projected_maxes_enc BLOB,
   overrides_enc BLOB NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -212,6 +233,9 @@ class Database:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as conn:
             conn.executescript(SCHEMA)
+            athlete_columns = {row["name"] for row in conn.execute("PRAGMA table_info(athletes)")}
+            if "projected_maxes_enc" not in athlete_columns:
+                conn.execute("ALTER TABLE athletes ADD COLUMN projected_maxes_enc BLOB")
             conn.execute("PRAGMA optimize")
         if os.name != "nt":
             os.chmod(self.path, 0o600)
@@ -219,6 +243,225 @@ class Database:
     def admin_count(self) -> int:
         with self.connection() as conn:
             return int(conn.execute("SELECT count(*) FROM admins").fetchone()[0])
+
+    def ensure_test_student(self, password_hash: str) -> None:
+        """Create the temporary student/test account requested for the first student UI."""
+        now = utcnow()
+        athlete_id = "student-test-athlete"
+        with self.transaction() as conn:
+            existing = conn.execute(
+                "SELECT id FROM student_accounts WHERE username_lookup=?",
+                (self.cipher.lookup("student"),),
+            ).fetchone()
+            if existing:
+                return
+            group = conn.execute("SELECT id FROM class_groups WHERE name=?", ("Student Test Group",)).fetchone()
+            if not group:
+                group_id = conn.execute(
+                    "INSERT INTO class_groups(name,sort_order) VALUES(?,?)", ("Student Test Group", 999)
+                ).lastrowid
+            else:
+                group_id = group["id"]
+            if not conn.execute("SELECT id FROM athletes WHERE id=?", (athlete_id,)).fetchone():
+                conn.execute(
+                    """INSERT INTO athletes(id,name_enc,name_lookup,grade_enc,teacher_enc,class_group_id,subgroup_enc,maxes_enc,projected_maxes_enc,overrides_enc,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        athlete_id, self.cipher.encrypt("Student Test"), self.cipher.lookup("Student Test"),
+                        self.cipher.encrypt("Test"), self.cipher.encrypt(""), group_id, self.cipher.encrypt(""),
+                        self.cipher.encrypt(json.dumps({"Bench": 200, "Back Squat": 300, "Power Clean": 185})),
+                        self.cipher.encrypt(json.dumps({"Bench": 200, "Back Squat": 300, "Power Clean": 185})),
+                        self.cipher.encrypt("{}"), now, now,
+                    ),
+                )
+            conn.execute(
+                """INSERT INTO student_accounts(athlete_id,username_lookup,username_enc,password_hash,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (athlete_id, self.cipher.lookup("student"), self.cipher.encrypt("student"), password_hash, now),
+            )
+
+    def get_student_dashboard(self, athlete_id: str, workout_date: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            athlete = conn.execute(
+                """SELECT a.*,g.name AS group_name FROM athletes a
+                   LEFT JOIN class_groups g ON g.id=a.class_group_id WHERE a.id=?""",
+                (athlete_id,),
+            ).fetchone()
+            if not athlete:
+                return None
+            actual = json.loads(self.cipher.decrypt(athlete["maxes_enc"]) or "{}")
+            projected = json.loads(self.cipher.decrypt(athlete["projected_maxes_enc"]) or "{}") if athlete["projected_maxes_enc"] else {}
+            available_sports = [row["name"] for row in conn.execute("SELECT name FROM sports ORDER BY sort_order,name")]
+            selected_sports = [row["name"] for row in conn.execute(
+                """SELECT s.name FROM athlete_sports a JOIN sports s ON s.id=a.sport_id
+                   WHERE a.athlete_id=? ORDER BY s.sort_order,s.name""",
+                (athlete_id,),
+            )]
+            rows = conn.execute(
+                """SELECT p.*,a.assigned_date,a.percent,a.notes_enc AS assignment_notes_enc,a.locked
+                   FROM prescriptions p JOIN assignments a ON a.id=p.assignment_id
+                   WHERE p.athlete_id=? ORDER BY a.assigned_date DESC,a.priority DESC,a.created_at DESC""",
+                (athlete_id,),
+            ).fetchall()
+            def serialize(row: sqlite3.Row) -> dict[str, Any]:
+                lift = self.cipher.decrypt(row["lift_enc"])
+                return {
+                    "id": row["id"], "date": row["assigned_date"], "lift": lift,
+                    "percent": row["percent"], "sets": row["sets_count"], "reps": row["reps"],
+                    "expectedReps": row["expected_reps"], "prescribedLoad": row["prescribed_load"],
+                    "projectedMaxUsed": row["projected_max"],
+                    "burnoutReps": row["burnout_reps"] if row["burnout_reps"] is not None else None,
+                    "submitted": bool(row["submitted"]), "locked": bool(row["locked"]),
+                    "notes": self.cipher.decrypt(row["assignment_notes_enc"]) or "",
+                }
+            items = [serialize(row) for row in rows]
+            lifts = sorted(set(actual) | set(projected))
+            return {
+                "athlete": {
+                    "name": self.cipher.decrypt(athlete["name_enc"]),
+                    "grade": self.cipher.decrypt(athlete["grade_enc"]) or "",
+                    "classGroup": athlete["group_name"] or "",
+                },
+                "sports": {"available": available_sports, "selected": selected_sports},
+                "maxes": [{"lift": lift, "actual": actual.get(lift), "projected": projected.get(lift, actual.get(lift))} for lift in lifts],
+                "today": [item for item in items if item["date"] == workout_date],
+                "history": [item for item in items if item["submitted"]][:50],
+            }
+
+    def set_student_sports(self, athlete_id: str, sports: list[str], effective_date: str) -> list[str]:
+        if not isinstance(sports, list) or len(sports) > 100 or any(not isinstance(name, str) for name in sports):
+            raise ValueError("Sports must be a list")
+        normalized = list(dict.fromkeys(name.strip() for name in sports if name.strip()))
+        if len(normalized) != len(sports) or any(len(name) > 100 for name in normalized):
+            raise ValueError("Sports contain invalid or duplicate values")
+        try:
+            if len(effective_date) != 10:
+                raise ValueError
+            datetime.fromisoformat(effective_date)
+        except ValueError as exc:
+            raise ValueError("A valid effective date is required") from exc
+
+        with self.transaction() as conn:
+            athlete = conn.execute(
+                "SELECT class_group_id,maxes_enc,projected_maxes_enc,overrides_enc FROM athletes WHERE id=?",
+                (athlete_id,),
+            ).fetchone()
+            if not athlete:
+                raise ValueError("Student account is not linked to an athlete")
+            sport_rows = conn.execute("SELECT id,name FROM sports ORDER BY sort_order,name").fetchall()
+            sport_ids = {row["name"]: row["id"] for row in sport_rows}
+            unknown = [name for name in normalized if name not in sport_ids]
+            if unknown:
+                raise ValueError("One or more selected sports are not available")
+            selected_ids = {sport_ids[name] for name in normalized}
+            existing = {
+                row["sport_id"]: row["subgroup_enc"]
+                for row in conn.execute("SELECT sport_id,subgroup_enc FROM athlete_sports WHERE athlete_id=?", (athlete_id,))
+            }
+            for sport_id in set(existing) - selected_ids:
+                conn.execute("DELETE FROM athlete_sports WHERE athlete_id=? AND sport_id=?", (athlete_id, sport_id))
+            for sport_id in selected_ids - set(existing):
+                conn.execute(
+                    "INSERT INTO athlete_sports(athlete_id,sport_id,subgroup_enc) VALUES(?,?,?)",
+                    (athlete_id, sport_id, self.cipher.encrypt("")),
+                )
+
+            actual = json.loads(self.cipher.decrypt(athlete["maxes_enc"]) or "{}")
+            projected = json.loads(self.cipher.decrypt(athlete["projected_maxes_enc"]) or "{}") if athlete["projected_maxes_enc"] else {}
+            overrides = json.loads(self.cipher.decrypt(athlete["overrides_enc"]) or "{}")
+            assignments = conn.execute(
+                """SELECT * FROM assignments WHERE class_group_id=? AND assigned_date>=?
+                   ORDER BY assigned_date,created_at""",
+                (athlete["class_group_id"], effective_date),
+            ).fetchall()
+            for assignment in assignments:
+                prescription = conn.execute(
+                    "SELECT id,submitted,is_override FROM prescriptions WHERE assignment_id=? AND athlete_id=?",
+                    (assignment["id"], athlete_id),
+                ).fetchone()
+                eligible = assignment["sport_id"] is None or assignment["sport_id"] in selected_ids
+                if not eligible and prescription and not prescription["submitted"] and not prescription["is_override"]:
+                    conn.execute("DELETE FROM prescriptions WHERE id=?", (prescription["id"],))
+                elif eligible and not prescription:
+                    lift = self.cipher.decrypt(assignment["lift_enc"])
+                    max_value = overrides.get(lift) or projected.get(lift) or actual.get(lift)
+                    load = math.floor(float(max_value) * assignment["percent"] / 100 / 5 + 0.5) * 5 if max_value else None
+                    conn.execute(
+                        """INSERT INTO prescriptions(id,assignment_id,athlete_id,lift_enc,projected_max,prescribed_load,sets_count,reps,expected_reps,completed_load,burnout_reps,note_enc,submitted,load_mismatch,needs_review,is_override)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            f"student-sport-{uuid.uuid4().hex}", assignment["id"], athlete_id, assignment["lift_enc"],
+                            max_value, load, assignment["sets_count"], assignment["reps"], assignment["expected_reps"],
+                            None, None, self.cipher.encrypt(""), 0, 0, 0, 0,
+                        ),
+                    )
+            conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
+            return [row["name"] for row in sport_rows if row["id"] in selected_ids]
+
+    def log_student_lift(self, athlete_id: str, prescription_id: str, burnout_reps: int) -> dict[str, Any]:
+        if isinstance(burnout_reps, bool) or not isinstance(burnout_reps, int) or not 0 <= burnout_reps <= 100:
+            raise ValueError("Total burnout reps must be between 0 and 100")
+        now = utcnow()
+        with self.transaction() as conn:
+            row = conn.execute(
+                """SELECT p.*,a.locked,a.assigned_date FROM prescriptions p
+                   JOIN assignments a ON a.id=p.assignment_id WHERE p.id=? AND p.athlete_id=?""",
+                (prescription_id, athlete_id),
+            ).fetchone()
+            if not row:
+                raise ValueError("Workout was not found")
+            if row["locked"]:
+                raise ValueError("This workout is locked")
+            lift = self.cipher.decrypt(row["lift_enc"])
+            normalized = " ".join(lift.casefold().replace("press", "").split())
+            if not any(name in normalized for name in ("bench", "squat", "power clean")):
+                raise ValueError("Burnout logging is only available for Bench, Squat, and Power Clean")
+            load = row["prescribed_load"]
+            if load is None or load <= 0:
+                raise ValueError("This workout does not have a prescribed weight")
+            projected_max = math.floor(float(load) * (1 + burnout_reps / 30) / 5 + 0.5) * 5
+            athlete = conn.execute("SELECT maxes_enc,projected_maxes_enc FROM athletes WHERE id=?", (athlete_id,)).fetchone()
+            if not athlete:
+                raise ValueError("Student account is not linked to an athlete")
+            actual = json.loads(self.cipher.decrypt(athlete["maxes_enc"]) or "{}")
+            projected = json.loads(self.cipher.decrypt(athlete["projected_maxes_enc"]) or "{}") if athlete["projected_maxes_enc"] else {}
+            old_max = projected.get(lift, actual.get(lift, row["projected_max"] or 0))
+            projected[lift] = projected_max
+            conn.execute(
+                "UPDATE athletes SET projected_maxes_enc=?,updated_at=? WHERE id=?",
+                (self.cipher.encrypt(json.dumps(projected, separators=(",", ":"))), now, athlete_id),
+            )
+            future_rows = conn.execute(
+                """SELECT p.id,p.lift_enc,a.percent FROM prescriptions p
+                   JOIN assignments a ON a.id=p.assignment_id
+                   WHERE p.athlete_id=? AND p.submitted=0 AND a.assigned_date>?""",
+                (athlete_id, row["assigned_date"]),
+            ).fetchall()
+            for future in future_rows:
+                if self.cipher.decrypt(future["lift_enc"]) == lift:
+                    next_load = math.floor(projected_max * future["percent"] / 100 / 5 + 0.5) * 5
+                    conn.execute(
+                        "UPDATE prescriptions SET projected_max=?,prescribed_load=? WHERE id=?",
+                        (projected_max, next_load, future["id"]),
+                    )
+            needs_review = burnout_reps > row["expected_reps"] + 15
+            conn.execute(
+                """UPDATE prescriptions SET completed_load=?,burnout_reps=?,submitted=1,load_mismatch=0,needs_review=?
+                   WHERE id=?""",
+                (load, burnout_reps, int(needs_review), prescription_id),
+            )
+            suggestion_id = f"student-{prescription_id}"[:100]
+            conn.execute(
+                """INSERT INTO suggestions(id,prescription_id,assignment_id,athlete_id,lift_enc,old_max,burnout_reps,expected_reps,suggested_max,manual_max,extreme,status)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET old_max=excluded.old_max,burnout_reps=excluded.burnout_reps,
+                   expected_reps=excluded.expected_reps,suggested_max=excluded.suggested_max,manual_max=excluded.manual_max,
+                   extreme=excluded.extreme,status=excluded.status""",
+                (suggestion_id, prescription_id, row["assignment_id"], athlete_id, row["lift_enc"], old_max,
+                 burnout_reps, row["expected_reps"], projected_max, projected_max, int(needs_review), "approved"),
+            )
+            conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
+            return {"lift": lift, "actualMax": actual.get(lift), "previousProjectedMax": old_max, "projectedMax": projected_max}
 
     def audit(self, event: str, admin_id: int | None, ip_hash: str, detail: str = "") -> None:
         with self.connection() as conn:
@@ -257,6 +500,7 @@ class Database:
                     "groupBySport": group_by_sport.get(row["id"], {}),
                     "subgroup": self.cipher.decrypt(row["subgroup_enc"]) or "",
                     "maxes": json.loads(self.cipher.decrypt(row["maxes_enc"]) or "{}"),
+                    "projectedMaxes": json.loads(self.cipher.decrypt(row["projected_maxes_enc"]) or "{}") if row["projected_maxes_enc"] else {},
                     "overrides": json.loads(self.cipher.decrypt(row["overrides_enc"]) or "{}"),
                 })
             assignments = []
@@ -344,11 +588,12 @@ class Database:
                     continue
                 name_to_id[name] = athlete_id
                 valid_athlete_ids.add(athlete_id)
-                conn.execute("""INSERT INTO athletes(id,name_enc,name_lookup,grade_enc,teacher_enc,class_group_id,subgroup_enc,maxes_enc,overrides_enc,created_at,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (
+                conn.execute("""INSERT INTO athletes(id,name_enc,name_lookup,grade_enc,teacher_enc,class_group_id,subgroup_enc,maxes_enc,projected_maxes_enc,overrides_enc,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
                     athlete_id, self.cipher.encrypt(name), self.cipher.lookup(name), self.cipher.encrypt(athlete.get("grade", "")),
                     self.cipher.encrypt(athlete.get("teacher", "")), group_ids.get(athlete.get("classGroup")),
                     self.cipher.encrypt(athlete.get("subgroup", "")), self.cipher.encrypt(json.dumps(athlete.get("maxes", {}), separators=(",", ":"))),
+                    self.cipher.encrypt(json.dumps(athlete.get("projectedMaxes", {}), separators=(",", ":"))),
                     self.cipher.encrypt(json.dumps(athlete.get("overrides", {}), separators=(",", ":"))), now, now,
                 ))
                 group_by_sport = athlete.get("groupBySport", {})
@@ -502,6 +747,7 @@ def _validate_state(state: dict[str, Any]) -> None:
         for value in group_by_sport.values():
             _validated_text(value, "sport training group", 100)
         _validated_number_map(athlete.get("maxes", {}), "maxes")
+        _validated_number_map(athlete.get("projectedMaxes", {}), "projected maxes")
         _validated_number_map(athlete.get("overrides", {}), "overrides")
 
     assignment_ids: set[str] = set()
