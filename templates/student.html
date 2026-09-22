@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>Student · ARCA Strength</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="student-page">
+  <header class="student-topbar">
+    <a class="student-brand" href="#today" aria-label="ARCA Strength home">
+      <img src="{{ url_for('static', filename='img/athletic-eagle-logo.png') }}" alt="">
+      <span><strong>ARCA Strength</strong><small>Athletic PE</small></span>
+    </a>
+    <form method="post" action="{{ url_for('logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="student-signout" type="submit">Sign out</button>
+    </form>
+  </header>
+
+  <main class="student-shell">
+    <section class="student-view" data-student-view="today">
+      <div class="student-welcome">
+        <div><span class="student-kicker" id="today-label">Today</span><h1 id="student-name">Loading…</h1><p id="student-meta"></p></div>
+        <button class="student-avatar" type="button" data-open-view="maxes" aria-label="View maxes">ES</button>
+      </div>
+      <div class="student-section-heading"><div><h2>Today’s lifts</h2><p>Complete the listed sets, then log the total reps from your final burnout set.</p></div></div>
+      <div class="student-workouts" id="student-workouts" aria-live="polite"></div>
+      <button class="student-primary-action" id="open-log" type="button">Log today’s lifts</button>
+    </section>
+
+    <section class="student-view" data-student-view="log" hidden>
+      <button class="student-back" type="button" data-open-view="today">← Today’s workout</button>
+      <span class="student-kicker">Final set</span><h1>Log burnout reps</h1>
+      <p class="student-intro">Enter the total reps you completed—not the difference from the target.</p>
+      <form id="student-log-form">
+        <div class="student-log-list" id="student-log-list"></div>
+        <div class="student-form-message" id="student-form-message" role="status"></div>
+        <button class="student-primary-action" id="save-lifts" type="submit">Save results</button>
+      </form>
+      <section class="student-result" id="student-result" hidden aria-live="polite">
+        <span class="student-kicker">Updated</span><h2>New projected maxes</h2><div id="student-result-list"></div>
+        <button class="student-secondary-action" type="button" data-open-view="maxes">Compare maxes</button>
+      </section>
+    </section>
+
+    <section class="student-view" data-student-view="maxes" hidden>
+      <button class="student-back" type="button" data-open-view="today">← Today’s workout</button>
+      <span class="student-kicker">Progress</span><h1>Actual vs. projected</h1>
+      <p class="student-intro">Actual maxes are recorded attempts. Projected maxes update from your burnout sets.</p>
+      <div class="student-max-list" id="student-max-list"></div>
+      <form class="student-profile-card" id="student-sports-form">
+        <div><span class="student-kicker">Student profile</span><h2>Your sports</h2><p>This list syncs directly from the sports configured in the coach dashboard. Check every sport you participate in so its assignments reach you.</p></div>
+        <fieldset class="student-sport-options" id="student-sport-options"><legend class="sr-only">Your sports</legend></fieldset>
+        <div class="student-form-message" id="student-sports-message" role="status"></div>
+        <button class="student-secondary-action" type="submit">Save sports</button>
+      </form>
+    </section>
+
+    <section class="student-view" data-student-view="history" hidden>
+      <button class="student-back" type="button" data-open-view="today">← Today’s workout</button>
+      <span class="student-kicker">Workout log</span><h1>Recent results</h1>
+      <p class="student-intro">Each result compares your final burnout set with the coach’s target for that workout.</p>
+      <div class="student-history" id="student-history"></div>
+    </section>
+  </main>
+
+  <nav class="student-nav" aria-label="Student navigation">
+    <button type="button" data-open-view="today" class="active"><span>⌂</span>Today</button>
+    <button type="button" data-open-view="maxes"><span>↗</span>Maxes</button>
+    <button type="button" data-open-view="history"><span>≡</span>History</button>
+  </nav>
+  <script src="{{ url_for('static', filename='js/student.js') }}" defer></script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# Arc Strength Athletic PE
+# ARCA Strength Athletic PE
 
 Secure Flask edition of the Athletic PE strength-planning app for a private LXC server.
 
@@ -15,6 +15,15 @@ Secure Flask edition of the Athletic PE strength-planning app for a private LXC 
 - Whole-planner saves use an optimistic revision check so an older browser cannot silently overwrite newer server data. Attendance taps use a narrow atomic endpoint so several sign-in screens can be used safely.
 
 Field encryption does not hide non-sensitive relational metadata such as internal IDs, dates, group IDs, set counts, or percentages. Protect the LXC host and encrypted key files; anyone who steals both the database and keys can decrypt the records.
+
+## Temporary student portal account
+
+The first student-portal build creates a local test athlete and account on normal startup:
+
+- Username: `student`
+- Password: `test`
+
+The account opens the mobile student portal at `/student`. Its home screen is populated only by prescriptions created from the coach’s assignments for the current date. Set `ARC_ENABLE_TEST_STUDENT=0` to disable automatic creation before deploying real student accounts. Student records are scoped server-side to their linked athlete; student sessions cannot access coach APIs.
 
 ## Ubuntu 26.04 LXC deployment
 
