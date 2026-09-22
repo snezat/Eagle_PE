@@ -28,6 +28,7 @@
           <button data-view="results">Log results</button>
           <button data-view="roster">Roster & groups</button>
           <button data-view="dashboard">Dashboard</button>
+          <button data-view="settings">App Settings</button>
         </nav>
         <div class="aside-title">Athletic PE organization</div>
         <div id="side-groups"></div>
@@ -103,9 +104,53 @@
           <div class="heading small"><h2 id="roster-title">All athletes</h2><span id="roster-count"></span></div>
           <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Class group</th><th>Sports</th><th>Sport training groups</th><th>Projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
         </section>
+
+        <section data-panel="settings" hidden>
+          <div class="heading"><div><h1>App Settings</h1><p>Monitor this server, manage coach accounts, and install application updates.</p></div><button class="btn" id="settings-refresh" type="button">Refresh</button></div>
+          <div class="stats settings-health">
+            <article><span>Server</span><strong id="health-status">Checking…</strong></article>
+            <article><span>App uptime</span><strong id="health-uptime">—</strong></article>
+            <article><span>Database</span><strong id="health-database">—</strong></article>
+            <article><span>Free storage</span><strong id="health-storage">—</strong></article>
+          </div>
+          <div class="cards two settings-grid">
+            <article class="card">
+              <div class="heading small"><div><h2>Server details</h2><p>Current application process and host information.</p></div></div>
+              <dl class="detail-list">
+                <div><dt>Operating system</dt><dd id="health-os">—</dd></div>
+                <div><dt>Python</dt><dd id="health-python">—</dd></div>
+                <div><dt>Process started</dt><dd id="health-started">—</dd></div>
+                <div><dt>Server time</dt><dd id="health-time">—</dd></div>
+                <div><dt>Database size</dt><dd id="health-db-size">—</dd></div>
+              </dl>
+            </article>
+            <article class="card update-card">
+              <div class="heading small"><div><h2>Application update</h2><p>Download the latest approved version from GitHub, refresh dependencies, and restart the service.</p></div></div>
+              <div class="update-state"><span class="status-dot" id="update-dot"></span><div><strong id="update-state">Checking updater…</strong><p id="update-message"></p></div></div>
+              <div class="message" id="update-version"></div>
+              <button class="btn primary" id="run-update" type="button">Update app now</button>
+            </article>
+          </div>
+          <article class="card users-card">
+            <div class="heading small"><div><h2>Coach accounts</h2><p>Locked users are signed out immediately and cannot sign back in.</p></div><button class="btn" id="add-settings-user" type="button">Add coach account</button></div>
+            <div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Created</th><th>Last sign-in</th><th>Controls</th></tr></thead><tbody id="settings-users"></tbody></table></div>
+            <div class="message" id="settings-message" role="status"></div>
+          </article>
+        </section>
       </main>
     </div>
   </div>
+  <dialog id="password-dialog" class="settings-dialog">
+    <form id="password-form">
+      <div class="heading small"><div><h2 id="password-dialog-title">Reset password</h2><p id="password-user"></p></div></div>
+      <input id="password-user-id" type="hidden">
+      <label id="password-username-field" hidden>Username<input id="new-user-username" autocomplete="username" minlength="3" maxlength="80"></label>
+      <label>New passphrase<input id="new-user-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
+      <label>Confirm passphrase<input id="confirm-user-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label>
+      <div class="message" id="password-message" role="alert"></div>
+      <div class="dialog-actions"><button class="btn" id="password-cancel" type="button">Cancel</button><button class="btn primary" type="submit">Save new password</button></div>
+    </form>
+  </dialog>
   <div class="fatal" id="fatal" hidden><h1>Unable to load the planner</h1><p>Your session may have expired. Sign in again.</p><a class="btn primary" href="/">Return to sign in</a></div>
 </body>
 </html>

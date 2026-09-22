@@ -20,6 +20,7 @@ let tvMode = "both";
 let attendanceGroup = "Nonfootball Group A";
 let saving = false;
 let saveQueued = false;
+let settingsPoll = null;
 
 function optionList(select, items, allLabel = null, chosen = null) {
   select.replaceChildren();
@@ -95,11 +96,187 @@ async function saveAttendance(date, group, athleteId, present) {
   state.revision = Math.max(Number(state.revision || 0), Number(result.revision || 0));
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let amount = value / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && amount >= 1024; index += 1) { amount /= 1024; unit = units[index]; }
+  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${unit}`;
+}
+
+function formatDate(value) {
+  if (!value) return "Never";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+}
+
+function formatDuration(seconds) {
+  let remaining = Math.max(0, Number(seconds || 0));
+  const days = Math.floor(remaining / 86400); remaining %= 86400;
+  const hours = Math.floor(remaining / 3600); remaining %= 3600;
+  const minutes = Math.floor(remaining / 60);
+  return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+async function settingsRequest(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...options,
+    headers: {Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": csrf, ...(options.headers || {})},
+  });
+  if (response.status === 401) { location.href = "/"; throw new Error("session"); }
+  const result = await response.json().catch(() => ({error: "The server returned an invalid response."}));
+  if (!response.ok) throw new Error(result.error || "Request failed");
+  return result;
+}
+
+function renderSettingsUsers(users) {
+  const body = $("#settings-users");
+  body.replaceChildren();
+  users.forEach(user => {
+    const row = document.createElement("tr");
+    const name = document.createElement("div");
+    name.className = "athlete-name";
+    name.textContent = user.username;
+    if (user.current) name.append(" (you)");
+    const status = badge(user.active ? "Active" : "Locked", user.active ? "" : "bad");
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const reset = document.createElement("button");
+    reset.className = "btn mini"; reset.type = "button"; reset.textContent = "Reset password";
+    reset.addEventListener("click", () => openPasswordDialog(user));
+    const lock = document.createElement("button");
+    lock.className = "btn mini"; lock.type = "button"; lock.textContent = user.active ? "Lock" : "Unlock";
+    lock.disabled = Boolean(user.current && user.active);
+    lock.title = lock.disabled ? "You cannot lock the account you are currently using." : "";
+    lock.addEventListener("click", () => changeUserLock(user));
+    const remove = document.createElement("button");
+    remove.className = "btn mini danger"; remove.type = "button"; remove.textContent = "Delete";
+    remove.disabled = Boolean(user.current);
+    remove.title = remove.disabled ? "You cannot delete the account you are currently using." : "";
+    remove.addEventListener("click", () => deleteSettingsUser(user));
+    actions.append(reset, lock, remove);
+    row.append(cell(name), cell(status), cell(formatDate(user.createdAt)), cell(formatDate(user.lastLoginAt)), cell(actions));
+    body.append(row);
+  });
+  if (!users.length) {
+    const row = document.createElement("tr");
+    const empty = cell("No coach accounts were found."); empty.colSpan = 5; empty.className = "empty-row"; row.append(empty); body.append(row);
+  }
+}
+
+function renderAppSettings(data) {
+  const health = data.health || {};
+  $("#health-status").textContent = health.status === "healthy" ? "Healthy" : "Needs attention";
+  $("#health-status").classList.toggle("health-good", health.status === "healthy");
+  $("#health-uptime").textContent = formatDuration(health.processUptimeSeconds);
+  $("#health-database").textContent = health.database === "ok" ? "Healthy" : String(health.database || "Unknown");
+  $("#health-storage").textContent = formatBytes(health.diskFreeBytes);
+  $("#health-os").textContent = health.operatingSystem || "Unknown";
+  $("#health-python").textContent = health.pythonVersion || "Unknown";
+  $("#health-started").textContent = formatDate(health.processStartedAt);
+  $("#health-time").textContent = formatDate(health.serverTime);
+  $("#health-db-size").textContent = formatBytes(health.databaseBytes);
+  renderSettingsUsers(data.users || []);
+
+  const update = data.update || {};
+  const labels = {idle: "Ready to update", queued: "Update queued", running: "Updating app", success: "Update complete", failed: "Update failed", unknown: "Status unavailable"};
+  $("#update-state").textContent = labels[update.state] || "Update status";
+  $("#update-message").textContent = update.message || "";
+  $("#update-version").textContent = update.version ? `Installed version: ${update.version}` : "";
+  $("#update-dot").className = `status-dot ${update.state || "unknown"}`;
+  const busy = ["queued", "running"].includes(update.state);
+  $("#run-update").disabled = !update.available || busy;
+  $("#run-update").textContent = busy ? "Update in progress…" : "Update app now";
+  if (!update.available) $("#update-message").textContent = "The secure updater is not installed on this server. Run the current installer once to enable one-click updates.";
+  if (busy && !settingsPoll) settingsPoll = window.setInterval(() => loadAppSettings(false), 2500);
+  if (!busy && settingsPoll) { window.clearInterval(settingsPoll); settingsPoll = null; }
+}
+
+async function loadAppSettings(showError = true) {
+  try {
+    const data = await settingsRequest("/api/app-settings", {method: "GET"});
+    renderAppSettings(data);
+    message("settings-message", "");
+  } catch (error) {
+    if (showError) message("settings-message", error.message);
+  }
+}
+
+function openPasswordDialog(user) {
+  $("#password-user-id").value = user.id;
+  $("#password-dialog-title").textContent = "Reset password";
+  $("#password-user").textContent = `Choose a new passphrase for ${user.username}. Other signed-in sessions for this account will be closed.`;
+  $("#password-username-field").hidden = true;
+  $("#new-user-username").required = false;
+  $("#new-user-username").value = user.username;
+  $("#new-user-password").value = ""; $("#confirm-user-password").value = ""; message("password-message", "");
+  $("#password-dialog").showModal();
+  $("#new-user-password").focus();
+}
+
+function openAddUserDialog() {
+  $("#password-user-id").value = "";
+  $("#password-dialog-title").textContent = "Add coach account";
+  $("#password-user").textContent = "Create a separate sign-in for another authorized coach.";
+  $("#password-username-field").hidden = false;
+  $("#new-user-username").required = true;
+  $("#new-user-username").value = "";
+  $("#new-user-password").value = ""; $("#confirm-user-password").value = ""; message("password-message", "");
+  $("#password-dialog").showModal();
+  $("#new-user-username").focus();
+}
+
+async function submitPasswordReset(event) {
+  event.preventDefault();
+  const password = $("#new-user-password").value;
+  const confirmPassword = $("#confirm-user-password").value;
+  if (password !== confirmPassword) { message("password-message", "The passwords do not match."); return; }
+  try {
+    const userId = $("#password-user-id").value;
+    const creating = !userId;
+    const url = creating ? "/api/app-settings/users" : `/api/app-settings/users/${encodeURIComponent(userId)}/password`;
+    const body = {password, confirmPassword};
+    if (creating) body.username = $("#new-user-username").value;
+    await settingsRequest(url, {method: creating ? "POST" : "PUT", body: JSON.stringify(body)});
+    $("#password-dialog").close(); await loadAppSettings(false); message("settings-message", creating ? "Coach account created successfully." : "Password reset successfully.");
+  } catch (error) { message("password-message", error.message); }
+}
+
+async function changeUserLock(user) {
+  const locked = user.active;
+  if (!window.confirm(`${locked ? "Lock" : "Unlock"} ${user.username}?${locked ? " They will be signed out immediately." : ""}`)) return;
+  try {
+    await settingsRequest(`/api/app-settings/users/${user.id}/lock`, {method: "PATCH", body: JSON.stringify({locked})});
+    await loadAppSettings(false); message("settings-message", `${user.username} was ${locked ? "locked" : "unlocked"}.`);
+  } catch (error) { message("settings-message", error.message); }
+}
+
+async function deleteSettingsUser(user) {
+  if (!window.confirm(`Permanently delete the coach account ${user.username}? This cannot be undone.`)) return;
+  try {
+    await settingsRequest(`/api/app-settings/users/${user.id}`, {method: "DELETE"});
+    await loadAppSettings(false); message("settings-message", `${user.username} was deleted.`);
+  } catch (error) { message("settings-message", error.message); }
+}
+
+async function runAppUpdate() {
+  if (!window.confirm("Install the latest app version from GitHub now? The server will restart and may be unavailable briefly.")) return;
+  try {
+    await settingsRequest("/api/app-update", {method: "POST", body: "{}"});
+    message("settings-message", "Update queued. This page will keep checking while the service restarts.");
+    await loadAppSettings(false);
+  } catch (error) { message("settings-message", error.message); }
+}
+
 function setupNavigation() {
   $$('[data-view]').forEach(button => button.addEventListener("click", () => {
     $$('[data-view]').forEach(item => item.setAttribute("aria-selected", String(item === button)));
     $$('[data-panel]').forEach(panel => panel.hidden = panel.dataset.panel !== button.dataset.view);
     renderAll();
+    if (button.dataset.view === "settings") loadAppSettings();
   }));
 }
 
@@ -531,6 +708,11 @@ function bindEvents() {
   document.addEventListener("fullscreenchange", () => { const panel = $('[data-panel="today"]'); panel.classList.toggle("tv-board-full", Boolean(document.fullscreenElement)); $("#tv-fullscreen").textContent = document.fullscreenElement ? "Exit TV mode" : "Enter TV mode"; });
   setInterval(updateClock, 30000);
   window.addEventListener("resize", renderAttendance);
+  $("#settings-refresh").addEventListener("click", () => loadAppSettings());
+  $("#run-update").addEventListener("click", runAppUpdate);
+  $("#password-form").addEventListener("submit", submitPasswordReset);
+  $("#password-cancel").addEventListener("click", () => $("#password-dialog").close());
+  $("#add-settings-user").addEventListener("click", openAddUserDialog);
 }
 
 loadState().then(() => { $("#tv-date").value = today(); bindEvents(); renderAll(); app.hidden = false; $("#save-status").textContent = "Encrypted server data loaded"; }).catch(() => { fatal.hidden = false; });

@@ -31,7 +31,10 @@ for required_file in \
   wsgi.py \
   requirements.txt \
   deploy/arc-strength.service \
+  deploy/arc-strength-update.service \
+  deploy/arc-strength-update.path \
   deploy/install-lxc.sh \
+  scripts/update-app.sh \
   templates/app.html \
   templates/error.html \
   templates/login.html \
@@ -57,11 +60,11 @@ echo "Installing Arc Strength system prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update || fail "apt-get update failed; verify the CT has DNS and internet access"
 apt-get install -y --no-install-recommends \
-  ca-certificates coreutils curl findutils hostname passwd \
+  ca-certificates coreutils curl findutils git hostname passwd \
   python3 python3-pip python3-venv rsync sqlite3 util-linux \
   || fail "base package installation failed"
 
-for command_name in chmod chown cp find hostname id mkdir mktemp mv python3 rsync runuser sqlite3 useradd; do
+for command_name in chmod chown cp find flock git hostname id mkdir mktemp mv python3 rsync runuser sqlite3 systemctl useradd; do
   require_command "$command_name"
 done
 
@@ -69,6 +72,8 @@ app_target=/opt/arc-strength
 data_target=/var/lib/arc-strength
 env_target=/etc/arc-strength.env
 service_target=/etc/systemd/system/arc-strength.service
+update_service_target=/etc/systemd/system/arc-strength-update.service
+update_path_target=/etc/systemd/system/arc-strength-update.path
 
 id arcstrength >/dev/null 2>&1 || \
   useradd --system --home "$data_target" --shell /usr/sbin/nologin arcstrength
@@ -97,6 +102,7 @@ for required_file in start.sh deploy/install-lxc.sh deploy/arc-strength.service 
 done
 chmod 0755 "$app_target/start.sh" "$app_target/deploy/install-lxc.sh"
 [ ! -f "$app_target/scripts/backup.sh" ] || chmod 0755 "$app_target/scripts/backup.sh"
+[ ! -f "$app_target/scripts/update-app.sh" ] || chmod 0755 "$app_target/scripts/update-app.sh"
 
 source_database="$app_source/instance/arc-strength.sqlite3"
 target_database="$data_target/arc-strength.sqlite3"
@@ -154,10 +160,13 @@ chown -R root:root "$app_target"
 chmod -R u=rwX,go=rX "$app_target"
 chmod 0755 "$app_target/start.sh" "$app_target/deploy/install-lxc.sh"
 [ ! -f "$app_target/scripts/backup.sh" ] || chmod 0755 "$app_target/scripts/backup.sh"
+chmod 0755 "$app_target/scripts/update-app.sh"
 
 cp "$app_target/deploy/arc-strength.service" "$service_target"
-chown root:root "$service_target"
-chmod 0644 "$service_target"
+cp "$app_target/deploy/arc-strength-update.service" "$update_service_target"
+cp "$app_target/deploy/arc-strength-update.path" "$update_path_target"
+chown root:root "$service_target" "$update_service_target" "$update_path_target"
+chmod 0644 "$service_target" "$update_service_target" "$update_path_target"
 
 lan_trusted_hosts=localhost,127.0.0.1
 lan_display_host=""
@@ -273,6 +282,7 @@ find "$data_target" -type f -exec chmod 0600 {} \;
 
 systemctl daemon-reload || fail "systemd could not reload the Arc Strength unit"
 systemctl enable arc-strength || fail "the Arc Strength service could not be enabled"
+systemctl enable --now arc-strength-update.path || fail "the Arc Strength update monitor could not be enabled"
 systemctl restart arc-strength || fail "the Arc Strength service could not be started"
 
 probe_application() {
