@@ -15,7 +15,7 @@ security_stub.FieldCipher = object
 sys.modules.setdefault("security", security_stub)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from db import Database, StateConflictError  # noqa: E402
+from db import Database, StateConflictError, _default_student_credentials  # noqa: E402
 
 
 class TestCipher:
@@ -66,6 +66,15 @@ with tempfile.TemporaryDirectory() as directory:
     database.initialize()
     state = sample_state()
     assert database.replace_state(state, 0) == 1
+    assert _default_student_credentials("José O'Neil") == ("joseoneil", "oneil")
+    assert _default_student_credentials("O'Neil, José") == ("joseoneil", "oneil")
+    assert database.sync_student_accounts(lambda password: f"hash:{password}") == 1
+    student_accounts = database.list_student_accounts()
+    assert student_accounts[0]["athleteName"] == "Test Athlete"
+    assert student_accounts[0]["username"] == "testathlete"
+    assert student_accounts[0]["password"] == "athlete"
+    database.update_student_account(student_accounts[0]["id"], "editedstudent", "newpassword", "hash:newpassword")
+    assert database.list_student_accounts()[0]["username"] == "editedstudent"
     loaded = database.get_state()
     assert loaded["revision"] == 1
     assert loaded["athletes"][0]["maxes"] == {"Bench": 150}
@@ -120,4 +129,4 @@ with tempfile.TemporaryDirectory() as directory:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-print(json.dumps({"databaseLogic": "ok", "revisionConflict": "ok", "atomicAttendance": "ok", "validation": "ok", "studentPortal": "ok"}))
+print(json.dumps({"databaseLogic": "ok", "revisionConflict": "ok", "atomicAttendance": "ok", "validation": "ok", "studentPortal": "ok", "studentAccounts": "ok"}))

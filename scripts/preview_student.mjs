@@ -17,6 +17,24 @@ const workouts = [
   {id: "preview-clean", date, lift: "Power Clean", percent: 65, sets: 2, reps: 5, expectedReps: 8, prescribedLoad: 120, projectedMaxUsed: 185, burnoutReps: null, submitted: false, locked: false, notes: "Final set is the burnout set."},
   {id: "preview-row", date, lift: "Dumbbell Row", percent: 60, sets: 3, reps: 10, expectedReps: 10, prescribedLoad: 50, projectedMaxUsed: null, burnoutReps: null, submitted: false, locked: false, notes: "Accessory lift."},
 ];
+const coachState = {
+  revision: 1,
+  classGroups: ["Nonfootball Group A", "Nonfootball Group B"],
+  sports: availableSports,
+  sportGroups: Object.fromEntries(availableSports.map(sport => [sport, []])),
+  athletes: [
+    {id: "preview-student-1", name: "Avery Johnson", grade: "10", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Football"], groupBySport: {}, subgroup: "", maxes: {Bench: 185}, projectedMaxes: {Bench: 195}, overrides: {}},
+    {id: "preview-student-2", name: "Maya O'Neil", grade: "11", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Basketball"], groupBySport: {}, subgroup: "", maxes: {Bench: 125}, projectedMaxes: {Bench: 130}, overrides: {}},
+    {id: "preview-student-3", name: "Jordan Smith", grade: "9", teacher: "Coach", classGroup: "Nonfootball Group B", sports: ["Baseball"], groupBySport: {}, subgroup: "", maxes: {Bench: 145}, projectedMaxes: {Bench: 155}, overrides: {}},
+  ],
+  assignments: [], prescriptions: [], suggestions: [], attendance: [],
+  liftLibrary: ["Bench", "Back Squat", "Power Clean", "Deadlift"],
+};
+const previewStudents = [
+  {id: 1, athleteId: "preview-student-1", athleteName: "Avery Johnson", username: "averyjohnson", password: "johnson", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
+  {id: 2, athleteId: "preview-student-2", athleteName: "Maya O'Neil", username: "mayaoneil", password: "oneil", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
+  {id: 3, athleteId: "preview-student-3", athleteName: "Jordan Smith", username: "jordansmith", password: "smith", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
+];
 
 function html(file) {
   return fs.readFileSync(path.join(root, "templates", file), "utf8")
@@ -60,6 +78,38 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (request.method === "POST" && url.pathname === "/logout") return send(response, 302, "", "text/plain", {Location: "/"});
+  if (request.method === "GET" && url.pathname === "/app") return send(response, 200, html("app.html"));
+  if (request.method === "GET" && url.pathname === "/api/state") return send(response, 200, JSON.stringify(coachState), "application/json");
+  if (request.method === "GET" && url.pathname === "/api/app-settings") return send(response, 200, JSON.stringify({
+    health: {status: "healthy", database: "ok", databaseBytes: 339968, diskFreeBytes: 80e9, diskTotalBytes: 120e9, pythonVersion: "3.12", operatingSystem: "Preview", processStartedAt: new Date().toISOString(), processUptimeSeconds: 3600, serverTime: new Date().toISOString()},
+    users: [{id: 1, username: "coach", active: true, createdAt: new Date().toISOString(), lastLoginAt: new Date().toISOString(), current: true}],
+    students: previewStudents,
+    update: {available: false, state: "idle", message: "Preview server"},
+  }), "application/json");
+  if (request.method === "PUT" && /^\/api\/app-settings\/students\/\d+$/.test(url.pathname)) {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const account = previewStudents.find(item => item.id === Number(url.pathname.split("/").pop()));
+      const payload = JSON.parse(body || "{}");
+      if (!account || !/^[a-z0-9]+$/.test(payload.username || "") || !/^[a-z0-9]+$/.test(payload.password || "")) return send(response, 400, JSON.stringify({error: "Use only lowercase letters and numbers."}), "application/json");
+      account.username = payload.username; account.password = payload.password;
+      return send(response, 200, JSON.stringify({ok: true}), "application/json");
+    });
+    return;
+  }
+  if (request.method === "PATCH" && /^\/api\/app-settings\/students\/\d+\/lock$/.test(url.pathname)) {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const parts = url.pathname.split("/");
+      const account = previewStudents.find(item => item.id === Number(parts.at(-2)));
+      if (!account) return send(response, 404, JSON.stringify({error: "Student account not found"}), "application/json");
+      account.active = !Boolean(JSON.parse(body || "{}").locked);
+      return send(response, 200, JSON.stringify({ok: true}), "application/json");
+    });
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/student") return send(response, 200, html("student.html"));
   if (request.method === "GET" && url.pathname === "/api/student/dashboard") return send(response, 200, JSON.stringify(dashboard()), "application/json");
   if (request.method === "PUT" && url.pathname === "/api/student/sports") {

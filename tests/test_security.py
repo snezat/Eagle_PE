@@ -200,6 +200,20 @@ def test_revision_conflict_and_atomic_attendance(tmp_path, monkeypatch):
     assert saved.status_code == 200
     assert saved.get_json()["revision"] == 1
 
+    settings = client.get("/api/app-settings").get_json()
+    assert [student["username"] for student in settings["students"]] == ["testathlete", "testathlete2"]
+    assert {student["password"] for student in settings["students"]} == {"athlete"}
+    first_account = settings["students"][0]
+    edited = client.put(
+        f"/api/app-settings/students/{first_account['id']}",
+        json={"username": "newstudent", "password": "newpassword"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert edited.status_code == 200
+    refreshed_accounts = client.get("/api/app-settings").get_json()["students"]
+    assert refreshed_accounts[0]["username"] == "newstudent"
+    assert refreshed_accounts[0]["password"] == "newpassword"
+
     stale = client.put("/api/state", json=state, headers={"X-CSRF-Token": csrf})
     assert stale.status_code == 409
     assert stale.get_json()["revision"] == 1
