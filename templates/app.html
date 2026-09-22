@@ -106,7 +106,7 @@
         </section>
 
         <section data-panel="settings" hidden>
-          <div class="heading"><div><h1>App Settings</h1><p>Monitor this server, manage coach accounts, and install application updates.</p></div><button class="btn" id="settings-refresh" type="button">Refresh</button></div>
+          <div class="heading"><div><h1>App Settings</h1><p>Monitor this server, manage coach and student accounts, and install application updates.</p></div><button class="btn" id="settings-refresh" type="button">Refresh</button></div>
           <div class="stats settings-health">
             <article><span>Server</span><strong id="health-status">Checking…</strong></article>
             <article><span>App uptime</span><strong id="health-uptime">—</strong></article>
@@ -135,6 +135,11 @@
             <div class="heading small"><div><h2>Coach accounts</h2><p>Locked users are signed out immediately and cannot sign back in.</p></div><button class="btn" id="add-settings-user" type="button">Add coach account</button></div>
             <div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Created</th><th>Last sign-in</th><th>Controls</th></tr></thead><tbody id="settings-users"></tbody></table></div>
             <div class="message" id="settings-message" role="status"></div>
+          </article>
+          <article class="card users-card student-accounts-card">
+            <div class="heading small"><div><h2>Student accounts</h2><p>Accounts are created automatically from the roster. Usernames use first name + last name; initial passwords use the last name. All credentials are lowercase with spaces and special characters removed.</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Student</th><th>Username</th><th>Password</th><th>Status</th><th>Last sign-in</th><th>Controls</th></tr></thead><tbody id="settings-students"></tbody></table></div>
+            <div class="message" id="student-accounts-message" role="status"></div>
           </article>
         </section>
       </main>

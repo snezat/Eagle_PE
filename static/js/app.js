@@ -167,6 +167,70 @@ function renderSettingsUsers(users) {
   }
 }
 
+function normalizeStudentCredential(value) {
+  return value.normalize("NFKD").replace(/[^\x00-\x7F]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function renderSettingsStudents(students) {
+  const body = $("#settings-students");
+  body.replaceChildren();
+  students.forEach(student => {
+    const row = document.createElement("tr");
+    const studentName = document.createElement("div");
+    studentName.className = "athlete-name";
+    studentName.textContent = student.athleteName;
+    const username = document.createElement("input");
+    username.className = "credential-input"; username.value = student.username; username.maxLength = 80;
+    username.autocomplete = "off"; username.setAttribute("aria-label", `Username for ${student.athleteName}`);
+    const password = document.createElement("input");
+    password.className = "credential-input"; password.type = "text"; password.value = student.password; password.maxLength = 80;
+    password.autocomplete = "off"; password.setAttribute("aria-label", `Password for ${student.athleteName}`);
+    [username, password].forEach(input => input.addEventListener("input", () => { input.value = normalizeStudentCredential(input.value); }));
+    const status = badge(student.active ? "Active" : "Locked", student.active ? "" : "bad");
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const save = document.createElement("button");
+    save.className = "btn mini primary"; save.type = "button"; save.textContent = "Save";
+    save.addEventListener("click", () => saveStudentAccount(student, username, password));
+    const lock = document.createElement("button");
+    lock.className = "btn mini"; lock.type = "button"; lock.textContent = student.active ? "Lock" : "Unlock";
+    lock.addEventListener("click", () => changeStudentAccountLock(student));
+    actions.append(save, lock);
+    row.append(cell(studentName), cell(username), cell(password), cell(status), cell(formatDate(student.lastLoginAt)), cell(actions));
+    body.append(row);
+  });
+  if (!students.length) {
+    const row = document.createElement("tr");
+    const empty = cell("No rostered students were found."); empty.colSpan = 6; empty.className = "empty-row"; row.append(empty); body.append(row);
+  }
+}
+
+async function saveStudentAccount(student, usernameInput, passwordInput) {
+  const username = normalizeStudentCredential(usernameInput.value);
+  const password = normalizeStudentCredential(passwordInput.value);
+  usernameInput.value = username; passwordInput.value = password;
+  if (!username || !password) { message("student-accounts-message", "Username and password are required."); return; }
+  try {
+    await settingsRequest(`/api/app-settings/students/${student.id}`, {
+      method: "PUT", body: JSON.stringify({username, password}),
+    });
+    await loadAppSettings(false);
+    message("student-accounts-message", `${student.athleteName}’s account was updated. Existing student sessions were signed out.`);
+  } catch (error) { message("student-accounts-message", error.message); }
+}
+
+async function changeStudentAccountLock(student) {
+  const locked = student.active;
+  if (!window.confirm(`${locked ? "Lock" : "Unlock"} ${student.athleteName}’s student account?${locked ? " They will be signed out immediately." : ""}`)) return;
+  try {
+    await settingsRequest(`/api/app-settings/students/${student.id}/lock`, {
+      method: "PATCH", body: JSON.stringify({locked}),
+    });
+    await loadAppSettings(false);
+    message("student-accounts-message", `${student.athleteName}’s account was ${locked ? "locked" : "unlocked"}.`);
+  } catch (error) { message("student-accounts-message", error.message); }
+}
+
 function renderAppSettings(data) {
   const health = data.health || {};
   $("#health-status").textContent = health.status === "healthy" ? "Healthy" : "Needs attention";
@@ -180,6 +244,7 @@ function renderAppSettings(data) {
   $("#health-time").textContent = formatDate(health.serverTime);
   $("#health-db-size").textContent = formatBytes(health.databaseBytes);
   renderSettingsUsers(data.users || []);
+  renderSettingsStudents(data.students || []);
 
   const update = data.update || {};
   const labels = {idle: "Ready to update", queued: "Update queued", running: "Updating app", success: "Update complete", failed: "Update failed", unknown: "Status unavailable"};

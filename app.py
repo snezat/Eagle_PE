@@ -72,6 +72,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     db.initialize()
     if app.config["ENABLE_TEST_STUDENT"] and not app.config.get("TESTING"):
         db.ensure_test_student(generate_password_hash("test", method="scrypt"))
+    db.sync_student_accounts(lambda password: generate_password_hash(password, method="scrypt"))
     app.extensions["arc_db"] = db
     app.extensions["arc_cipher"] = cipher
     dummy_password_hash = generate_password_hash(secrets.token_urlsafe(32), method="scrypt")
@@ -329,6 +330,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
                 raise ValueError("A valid state revision is required")
             new_revision = db.replace_state(payload, revision)
+            db.sync_student_accounts(lambda password: generate_password_hash(password, method="scrypt"))
         except StateConflictError as exc:
             return jsonify({"error": "Planner data changed on another screen. Reload and try again.", "revision": exc.current_revision}), 409
         except (ValueError, TypeError, KeyError) as exc:
@@ -388,6 +390,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "serverTime": utcnow(),
             },
             "users": users,
+            "students": db.list_student_accounts(),
             "update": {
                 "available": bool(app.config["UPDATER_ENABLED"]),
                 **update_status,
@@ -421,6 +424,48 @@ def create_app(test_config: dict | None = None) -> Flask:
             else:
                 conn.execute("DELETE FROM server_sessions WHERE admin_id=?", (user_id,))
         db.audit("admin_password_reset", g.admin, client_hash(), f"Password reset for user id {user_id}")
+        return jsonify({"ok": True})
+
+    @app.put("/api/app-settings/students/<int:account_id>")
+    @login_required
+    def update_student_account(account_id: int):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON object is required"}), 400
+        username = payload.get("username", "")
+        password = payload.get("password", "")
+        if not isinstance(username, str) or not isinstance(password, str):
+            return jsonify({"error": "Valid student credentials are required"}), 400
+        username = username.strip()
+        password = password.strip()
+        try:
+            db.update_student_account(
+                account_id, username, password, generate_password_hash(password, method="scrypt")
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except FileExistsError as exc:
+            return jsonify({"error": str(exc)}), 409
+        db.audit("student_account_updated", g.admin, client_hash(), f"Updated student account id {account_id}")
+        return jsonify({"ok": True})
+
+    @app.patch("/api/app-settings/students/<int:account_id>/lock")
+    @login_required
+    def set_student_account_lock(account_id: int):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("locked"), bool):
+            return jsonify({"error": "A valid lock state is required"}), 400
+        locked = payload["locked"]
+        try:
+            db.set_student_account_lock(account_id, locked)
+        except LookupError as exc:
+            return jsonify({"error": str(exc)}), 404
+        db.audit(
+            "student_account_locked" if locked else "student_account_unlocked",
+            g.admin, client_hash(), f"Changed student account id {account_id}",
+        )
         return jsonify({"ok": True})
 
     @app.post("/api/app-settings/users")

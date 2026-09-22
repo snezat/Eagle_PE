@@ -4,11 +4,12 @@ import json
 import math
 import os
 import sqlite3
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from security import FieldCipher
 
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS student_accounts (
   username_lookup TEXT NOT NULL UNIQUE,
   username_enc BLOB NOT NULL,
   password_hash TEXT NOT NULL,
+  password_enc BLOB,
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   last_login_at TEXT
@@ -236,6 +238,9 @@ class Database:
             athlete_columns = {row["name"] for row in conn.execute("PRAGMA table_info(athletes)")}
             if "projected_maxes_enc" not in athlete_columns:
                 conn.execute("ALTER TABLE athletes ADD COLUMN projected_maxes_enc BLOB")
+            student_columns = {row["name"] for row in conn.execute("PRAGMA table_info(student_accounts)")}
+            if "password_enc" not in student_columns:
+                conn.execute("ALTER TABLE student_accounts ADD COLUMN password_enc BLOB")
             conn.execute("PRAGMA optimize")
         if os.name != "nt":
             os.chmod(self.path, 0o600)
@@ -254,6 +259,10 @@ class Database:
                 (self.cipher.lookup("student"),),
             ).fetchone()
             if existing:
+                conn.execute(
+                    "UPDATE student_accounts SET password_enc=COALESCE(password_enc,?) WHERE id=?",
+                    (self.cipher.encrypt("test"), existing["id"]),
+                )
                 return
             group = conn.execute("SELECT id FROM class_groups WHERE name=?", ("Student Test Group",)).fetchone()
             if not group:
@@ -275,10 +284,99 @@ class Database:
                     ),
                 )
             conn.execute(
-                """INSERT INTO student_accounts(athlete_id,username_lookup,username_enc,password_hash,created_at)
-                   VALUES(?,?,?,?,?)""",
-                (athlete_id, self.cipher.lookup("student"), self.cipher.encrypt("student"), password_hash, now),
+                """INSERT INTO student_accounts(athlete_id,username_lookup,username_enc,password_hash,password_enc,created_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (athlete_id, self.cipher.lookup("student"), self.cipher.encrypt("student"), password_hash,
+                 self.cipher.encrypt("test"), now),
             )
+
+    def sync_student_accounts(self, password_hasher: Callable[[str], str]) -> int:
+        """Create credentials for rostered athletes that do not already have accounts."""
+        now = utcnow()
+        created = 0
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM student_accounts WHERE athlete_id NOT IN (SELECT id FROM athletes)")
+            existing_by_athlete = {
+                row["athlete_id"] for row in conn.execute("SELECT athlete_id FROM student_accounts")
+            }
+            reserved = {
+                self.cipher.decrypt(row["username_enc"]).casefold()
+                for row in conn.execute("SELECT username_enc FROM admins UNION ALL SELECT username_enc FROM student_accounts")
+            }
+            athletes = conn.execute("SELECT id,name_enc FROM athletes ORDER BY name_lookup,id").fetchall()
+            for athlete in athletes:
+                if athlete["id"] in existing_by_athlete:
+                    continue
+                name = self.cipher.decrypt(athlete["name_enc"])
+                username, password = _default_student_credentials(name)
+                candidate = username
+                suffix = 2
+                while candidate.casefold() in reserved:
+                    suffix_text = str(suffix)
+                    candidate = f"{username[:80 - len(suffix_text)]}{suffix_text}"
+                    suffix += 1
+                username = candidate
+                reserved.add(username.casefold())
+                conn.execute(
+                    """INSERT INTO student_accounts
+                       (athlete_id,username_lookup,username_enc,password_hash,password_enc,created_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    (
+                        athlete["id"], self.cipher.lookup(username), self.cipher.encrypt(username),
+                        password_hasher(password), self.cipher.encrypt(password), now,
+                    ),
+                )
+                created += 1
+        return created
+
+    def list_student_accounts(self) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT s.id,s.athlete_id,s.username_enc,s.password_enc,s.is_active,s.created_at,s.last_login_at,
+                          a.name_enc
+                   FROM student_accounts s JOIN athletes a ON a.id=s.athlete_id
+                   ORDER BY a.name_lookup,a.id"""
+            ).fetchall()
+        return [{
+            "id": row["id"],
+            "athleteId": row["athlete_id"],
+            "athleteName": self.cipher.decrypt(row["name_enc"]),
+            "username": self.cipher.decrypt(row["username_enc"]),
+            "password": self.cipher.decrypt(row["password_enc"]) if row["password_enc"] else "",
+            "active": bool(row["is_active"]),
+            "createdAt": row["created_at"],
+            "lastLoginAt": row["last_login_at"],
+        } for row in rows]
+
+    def update_student_account(self, account_id: int, username: str, password: str, password_hash: str) -> None:
+        if not _valid_student_credential(username) or not _valid_student_credential(password):
+            raise ValueError("Student usernames and passwords must contain only lowercase letters and numbers")
+        with self.transaction() as conn:
+            account = conn.execute("SELECT id FROM student_accounts WHERE id=?", (account_id,)).fetchone()
+            if not account:
+                raise LookupError("Student account not found")
+            lookup = self.cipher.lookup(username)
+            duplicate = conn.execute(
+                "SELECT id FROM student_accounts WHERE username_lookup=? AND id<>?", (lookup, account_id)
+            ).fetchone()
+            admin_duplicate = conn.execute("SELECT id FROM admins WHERE username_lookup=?", (lookup,)).fetchone()
+            if duplicate or admin_duplicate:
+                raise FileExistsError("An account with that username already exists")
+            conn.execute(
+                """UPDATE student_accounts
+                   SET username_lookup=?,username_enc=?,password_hash=?,password_enc=? WHERE id=?""",
+                (lookup, self.cipher.encrypt(username), password_hash, self.cipher.encrypt(password), account_id),
+            )
+            conn.execute("DELETE FROM student_sessions WHERE student_id=?", (account_id,))
+
+    def set_student_account_lock(self, account_id: int, locked: bool) -> None:
+        with self.transaction() as conn:
+            account = conn.execute("SELECT id FROM student_accounts WHERE id=?", (account_id,)).fetchone()
+            if not account:
+                raise LookupError("Student account not found")
+            conn.execute("UPDATE student_accounts SET is_active=? WHERE id=?", (0 if locked else 1, account_id))
+            if locked:
+                conn.execute("DELETE FROM student_sessions WHERE student_id=?", (account_id,))
 
     def get_student_dashboard(self, athlete_id: str, workout_date: str) -> dict[str, Any] | None:
         with self.connection() as conn:
@@ -685,6 +783,31 @@ class Database:
             new_revision = current_revision + 1
             conn.execute("UPDATE state_meta SET revision=? WHERE id=1", (new_revision,))
         return new_revision
+
+
+def _credential_part(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    return "".join(char for char in normalized.casefold() if char.isascii() and char.isalnum())
+
+
+def _default_student_credentials(name: str) -> tuple[str, str]:
+    if "," in name:
+        last_side, first_side = name.split(",", 1)
+        first_tokens = first_side.strip().split()
+        last_tokens = last_side.strip().split()
+    else:
+        tokens = name.strip().split()
+        first_tokens = tokens[:1]
+        last_tokens = tokens[-1:]
+    first = _credential_part(first_tokens[0]) if first_tokens else "student"
+    last = _credential_part("".join(last_tokens)) if last_tokens else first
+    first = first or "student"
+    last = last or first
+    return f"{first}{last}"[:80], last[:80]
+
+
+def _valid_student_credential(value: str) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= 80 and value.isascii() and value.isalnum() and value == value.lower()
 
 
 def _number(value):
