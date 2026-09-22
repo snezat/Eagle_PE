@@ -67,7 +67,7 @@ function render() {
   saveLifts.textContent = allBurnoutSubmitted ? "Update results" : "Save results";
   document.querySelector("#student-max-list").innerHTML = maxes.map(item => {
     const delta = item.actual != null && item.projected != null ? item.projected - item.actual : null;
-    return `<article class="student-max-card"><div><span>${escapeHtml(item.lift)}</span><small>Recorded max</small><strong>${pounds(item.actual)}</strong></div><div class="student-max-arrow">→</div><div><span>Projected</span><small>${delta == null ? "Awaiting result" : `${delta >= 0 ? "+" : ""}${delta} lb`}</small><strong>${pounds(item.projected)}</strong></div></article>`;
+    return `<article class="student-max-card"><label><span>${escapeHtml(item.lift)}</span><small>Recorded max</small><span class="student-max-field"><input data-max-lift="${escapeHtml(item.lift)}" type="number" min="1" max="5000" step="1" inputmode="numeric" value="${item.actual ?? ""}" placeholder="Enter max" aria-label="Recorded max for ${escapeHtml(item.lift)}"><em>lb</em></span></label><div class="student-max-arrow">→</div><div><span>Projected</span><small>${delta == null ? "Awaiting result" : `${delta >= 0 ? "+" : ""}${delta} lb`}</small><strong>${pounds(item.projected)}</strong></div></article>`;
   }).join("") || '<div class="student-empty">No maxes recorded yet.</div>';
   document.querySelector("#student-sport-options").innerHTML = sports.available.length ? sports.available.map(sport => `
     <label><input type="checkbox" name="sports" value="${escapeHtml(sport)}" ${sports.selected.includes(sport) ? "checked" : ""}><span>${escapeHtml(sport)}</span></label>`).join("") : '<p class="student-empty-sports">No sports have been created by the coach yet.</p>';
@@ -125,6 +125,30 @@ document.querySelector("#student-log-form").addEventListener("submit", async eve
     document.querySelector("#student-result").hidden = false;
     message.textContent = "Results saved.";
     await loadDashboard();
+  } catch (error) {
+    message.textContent = error.message;
+  }
+});
+
+document.querySelector("#student-max-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = document.querySelector("#student-max-message");
+  if (!form.reportValidity()) return;
+  const maxes = {};
+  form.querySelectorAll("[data-max-lift]").forEach(input => {
+    maxes[input.dataset.maxLift] = input.value === "" ? null : Number(input.value);
+  });
+  message.textContent = "Saving…";
+  try {
+    const response = await fetch("/api/student/maxes", {
+      method: "PUT", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
+      body: JSON.stringify({maxes}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not save your recorded maxes");
+    await loadDashboard();
+    document.querySelector("#student-max-message").textContent = "Recorded maxes saved and synced with your coach.";
   } catch (error) {
     message.textContent = error.message;
   }

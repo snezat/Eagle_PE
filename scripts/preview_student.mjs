@@ -9,6 +9,7 @@ const today = new Date();
 const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 const actual = {Bench: 200, "Back Squat": 300, "Power Clean": 185};
 const projected = {...actual};
+const liftLibrary = ["Bench", "Back Squat", "Power Clean", "Deadlift"];
 const availableSports = ["Football", "Basketball", "Baseball", "Track & Field"];
 let selectedSports = ["Football"];
 const workouts = [
@@ -28,7 +29,7 @@ const coachState = {
     {id: "preview-student-3", name: "Jordan Smith", grade: "9", teacher: "Coach", classGroup: "Nonfootball Group B", sports: ["Baseball"], groupBySport: {}, subgroup: "", maxes: {Bench: 145}, projectedMaxes: {Bench: 155}, overrides: {}},
   ],
   assignments: [], prescriptions: [], suggestions: [], attendance: [],
-  liftLibrary: ["Bench", "Back Squat", "Power Clean", "Deadlift"],
+  liftLibrary,
 };
 const previewStudents = [
   {id: 1, athleteId: "preview-student-1", athleteName: "Avery Johnson", username: "averyjohnson", password: "johnson", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
@@ -53,10 +54,11 @@ function send(response, status, body, type = "text/html; charset=utf-8", headers
 }
 
 function dashboard() {
+  const maxLifts = [...new Set([...liftLibrary, ...Object.keys(actual), ...Object.keys(projected), ...workouts.map(item => item.lift)])];
   return {
     athlete: {name: "Student Test", grade: "Test", classGroup: "Student Test Group"},
     sports: {available: availableSports, selected: selectedSports},
-    maxes: Object.keys(actual).map(lift => ({lift, actual: actual[lift], projected: projected[lift]})),
+    maxes: maxLifts.map(lift => ({lift, actual: actual[lift] ?? null, projected: projected[lift] ?? actual[lift] ?? null})),
     today: workouts,
     history: workouts.filter(item => item.submitted),
   };
@@ -112,6 +114,28 @@ const server = http.createServer((request, response) => {
   }
   if (request.method === "GET" && url.pathname === "/student") return send(response, 200, html("student.html"));
   if (request.method === "GET" && url.pathname === "/api/student/dashboard") return send(response, 200, JSON.stringify(dashboard()), "application/json");
+  if (request.method === "PUT" && url.pathname === "/api/student/maxes") {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const updates = JSON.parse(body || "{}").maxes;
+      if (!updates || typeof updates !== "object" || Array.isArray(updates)) return send(response, 400, JSON.stringify({error: "A maxes object is required"}), "application/json");
+      for (const [lift, value] of Object.entries(updates)) {
+        if (value == null || value === "") delete actual[lift];
+        else if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 5000) return send(response, 400, JSON.stringify({error: `Enter a valid recorded max for ${lift}`}), "application/json");
+        else actual[lift] = Math.round(value / 5) * 5;
+      }
+      coachState.athletes[0].maxes = {...actual};
+      coachState.revision += 1;
+      for (const workout of workouts.filter(item => !item.submitted && Object.hasOwn(updates, item.lift))) {
+        const max = projected[workout.lift] ?? actual[workout.lift];
+        workout.projectedMaxUsed = max ?? null;
+        workout.prescribedLoad = max == null ? null : Math.round(max * workout.percent / 100 / 5) * 5;
+      }
+      return send(response, 200, JSON.stringify({ok: true, maxes: actual}), "application/json");
+    });
+    return;
+  }
   if (request.method === "PUT" && url.pathname === "/api/student/sports") {
     let body = "";
     request.on("data", chunk => body += chunk);

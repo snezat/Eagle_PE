@@ -49,8 +49,12 @@
     <section class="student-view" data-student-view="maxes" hidden>
       <button class="student-back" type="button" data-open-view="today">← Today’s workout</button>
       <span class="student-kicker">Progress</span><h1>Actual vs. projected</h1>
-      <p class="student-intro">Actual maxes are recorded attempts. Projected maxes update from your burnout sets.</p>
-      <div class="student-max-list" id="student-max-list"></div>
+      <p class="student-intro">Enter your recorded max attempts here. Changes sync with your coach; projected maxes update from your burnout sets.</p>
+      <form id="student-max-form">
+        <div class="student-max-list" id="student-max-list"></div>
+        <div class="student-form-message" id="student-max-message" role="status"></div>
+        <button class="student-primary-action" type="submit">Save recorded maxes</button>
+      </form>
       <form class="student-profile-card" id="student-sports-form">
         <div><span class="student-kicker">Student profile</span><h2>Your sports</h2><p>This list syncs directly from the sports configured in the coach dashboard. Check every sport you participate in so its assignments reach you.</p></div>
         <fieldset class="student-sport-options" id="student-sport-options"><legend class="sr-only">Your sports</legend></fieldset>
