@@ -93,7 +93,14 @@
         </section>
 
         <section data-panel="roster" hidden>
-          <div class="heading"><div><h1>Roster & group setup</h1><p>Student records are encrypted in the server database.</p></div><div><button class="btn" id="add-athlete">Add athlete</button><button class="btn" id="edit-roster">Edit roster</button></div></div>
+          <div class="heading"><div><h1>Roster & group setup</h1><p>Student records are encrypted in the server database.</p></div><div class="roster-actions"><button class="btn primary" id="update-roster" type="button">Update roster from Excel</button><button class="btn" id="add-athlete" type="button">Add athlete</button><button class="btn" id="edit-roster" type="button">Edit roster</button><input id="roster-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden></div></div>
+          <article class="card roster-import" id="roster-import-preview" hidden>
+            <div class="heading small"><div><h2>Review roster update</h2><p>Nothing changes until you apply this preview. Existing student history and accounts are preserved for matched students.</p></div></div>
+            <div class="roster-import-stats" id="roster-import-summary"></div>
+            <div class="roster-import-details" id="roster-import-details"></div>
+            <div class="message" id="roster-import-message" role="status"></div>
+            <div class="dialog-actions"><button class="btn" id="cancel-roster-import" type="button">Cancel</button><button class="btn primary" id="apply-roster-import" type="button">Apply roster update</button></div>
+          </article>
           <article class="card" id="athlete-form" hidden><div class="form-grid"><label>Name<input id="new-name" maxlength="200"></label><label>Grade<input id="new-grade" maxlength="20"></label><label>Teacher<input id="new-teacher" maxlength="100"></label><label>Class group<select id="new-group"></select></label><fieldset class="wide"><legend>Sports</legend><div class="checks" id="new-sports"></div></fieldset><button class="btn primary" id="save-athlete">Save athlete</button></div></article>
           <div class="cards three roster-setup">
             <article class="card"><h2>Class groups</h2><div class="compact-add"><input id="new-class" maxlength="100" placeholder="New class group"><button class="btn" id="add-class" type="button">Add</button></div><div class="chips" id="class-options"></div></article>

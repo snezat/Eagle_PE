@@ -14,11 +14,12 @@ def test_server_ui_keeps_standalone_feature_parity():
         "tv-groups", "attendance-grid", "assignments", "lift-dropdown", "lift-options",
         "roster", "class-options", "sport-options", "sub-options", "f-sub",
         "settings-users", "add-settings-user", "run-update", "health-status", "password-dialog",
+        "update-roster", "roster-file", "roster-import-preview", "apply-roster-import",
     }
     for element_id in required_template_ids:
         assert f'id="{element_id}"' in template
     assert '<button data-view="review"' not in template
-    for feature in ("priority-workout", "saveAttendance", "groupBySport", "visibleRosterAthletes", "renderLiftDropdown"):
+    for feature in ("priority-workout", "saveAttendance", "groupBySport", "visibleRosterAthletes", "renderLiftDropdown", "previewRosterImport", "applyRosterImport"):
         assert feature in script
     for style in ("athletic-eagle-logo.png", ".attendance-grid", ".tv-grid.single", ".subgroup-editor"):
         assert style in styles

@@ -29,6 +29,8 @@ Every rostered athlete receives a student account automatically. The default use
 
 Students can enter or correct recorded maxes from their **Maxes** tab. Student and coach edits update the same athlete record, and changed maxes recalculate affected unsubmitted prescriptions.
 
+Changing a sport on the student profile asks the student whether to submit immediately. Once submitted, the same sports record used by the coach is updated and that day's sport-specific workout is refreshed.
+
 ## Ubuntu 26.04 LXC deployment
 
 Use an **unprivileged Ubuntu Server 26.04 LTS LXC** in Proxmox. Give it a static LAN address, allow enough memory for the OS plus Gunicorn, and allow application port 8000 only from the trusted local network. The installer uses Ubuntu's current `python3` package and a private virtual environment, so it does not depend on a hard-coded Python minor version.
@@ -72,6 +74,12 @@ The handoff directory's private `instance` database already contains the migrate
 `sudo -u arcstrength ARC_INSTANCE_PATH=/var/lib/arc-strength /opt/arc-strength/.venv/bin/python /opt/arc-strength/scripts/import_roster.py /secure/path/athletic-pe-roster-data.js`
 
 Delete the plaintext source from the server after confirming the import. Never place it under `static/`.
+
+For ongoing updates, a coach can open **Roster & groups → Update roster from Excel** and choose an `.xlsx` master roster containing a `Master Roster` sheet. The app previews matched, added, updated, and removed students before anything is saved. Applying the preview creates a database backup first, preserves existing IDs, accounts, workout history, projected maxes, and overrides for matched students, combines missing sports, uses a `New` lift max when supplied, and otherwise fills an empty max from the `Original` value. Parenthetical name notes such as `Bryce (Track)` are treated as aliases when there is one unambiguous stored match. Only unmatched students currently in Nonfootball Group A or B are removed, and conflicts block the import instead of guessing.
+
+The same workflow is available from the server console. Omit `--apply` for a read-only preview, then rerun with `--apply` after reviewing the summary:
+
+`sudo -u arcstrength ARC_INSTANCE_PATH=/var/lib/arc-strength /opt/arc-strength/.venv/bin/python /opt/arc-strength/scripts/import_master_roster.py /secure/path/Athletic_PE_Master_Roster_Performance.xlsx --instance /var/lib/arc-strength --apply`
 
 ## Backups
 

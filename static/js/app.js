@@ -21,6 +21,8 @@ let attendanceGroup = "Nonfootball Group A";
 let saving = false;
 let saveQueued = false;
 let settingsPoll = null;
+let rosterImportFile = null;
+let rosterImportPreview = null;
 
 function optionList(select, items, allLabel = null, chosen = null) {
   select.replaceChildren();
@@ -94,6 +96,110 @@ async function saveAttendance(date, group, athleteId, present) {
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "Attendance save failed");
   state.revision = Math.max(Number(state.revision || 0), Number(result.revision || 0));
+}
+
+async function rosterImportRequest(path, file, extra = {}) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  Object.entries(extra).forEach(([key, value]) => form.append(key, String(value)));
+  const response = await fetch(path, {
+    method: "POST", credentials: "same-origin",
+    headers: {"X-CSRF-Token": csrf, Accept: "application/json"}, body: form,
+  });
+  if (response.status === 401) { location.href = "/"; throw new Error("session"); }
+  const result = await response.json().catch(() => ({error: "The server returned an invalid response."}));
+  if (!response.ok) {
+    const error = new Error(result.error || "Roster update failed");
+    error.status = response.status;
+    throw error;
+  }
+  return result;
+}
+
+function rosterImportDetail(title, entries, describe = value => String(value)) {
+  if (!entries.length) return null;
+  const details = document.createElement("details");
+  const heading = document.createElement("summary");
+  heading.textContent = `${title} (${entries.length})`;
+  const list = document.createElement("ul");
+  entries.forEach(entry => { const item = document.createElement("li"); item.textContent = describe(entry); list.append(item); });
+  details.append(heading, list);
+  return details;
+}
+
+function renderRosterImportPreview(summary) {
+  const panel = $("#roster-import-preview");
+  panel.hidden = false;
+  const stats = $("#roster-import-summary");
+  stats.replaceChildren();
+  [
+    ["Workbook students", summary.workbookAthletes],
+    ["Matched", summary.matched],
+    ["New accounts", summary.added.length],
+    ["Removed", summary.removed.length],
+    ["Maxes filled", summary.maxesAdded],
+    ["Maxes updated", summary.maxesUpdated],
+  ].forEach(([label, value]) => {
+    const card = document.createElement("div");
+    const name = document.createElement("span"); name.textContent = label;
+    const count = document.createElement("strong"); count.textContent = value;
+    card.append(name, count); stats.append(card);
+  });
+  const details = $("#roster-import-details");
+  details.replaceChildren();
+  [
+    rosterImportDetail("New students", summary.added),
+    rosterImportDetail("Students that will be removed", summary.removed),
+    rosterImportDetail("Name overlaps preserved", summary.aliasMatches, item => `${item.workbookName} → ${item.currentName}`),
+    rosterImportDetail("Students updated", summary.updated, item => `${item.name}: ${item.changes.join(", ")}`),
+    rosterImportDetail("Conflicts to resolve", summary.issues, item => `${item.name}: ${item.detail}`),
+  ].filter(Boolean).forEach(element => details.append(element));
+  $("#apply-roster-import").disabled = !summary.canApply;
+  message("roster-import-message", summary.canApply
+    ? "Preview ready. Applying it will first create a database backup."
+    : "No changes were made. Resolve the listed conflicts in the workbook and preview it again.");
+}
+
+async function previewRosterImport(file) {
+  rosterImportFile = file;
+  rosterImportPreview = null;
+  $("#roster-import-preview").hidden = false;
+  $("#apply-roster-import").disabled = true;
+  message("roster-import-message", "Reading the master roster…");
+  try {
+    const result = await rosterImportRequest("/api/roster-import/preview", file);
+    rosterImportPreview = result.summary;
+    renderRosterImportPreview(result.summary);
+  } catch (error) {
+    message("roster-import-message", error.message);
+  }
+}
+
+function cancelRosterImport() {
+  rosterImportFile = null;
+  rosterImportPreview = null;
+  $("#roster-file").value = "";
+  $("#roster-import-preview").hidden = true;
+}
+
+async function applyRosterImport() {
+  if (!rosterImportFile || !rosterImportPreview?.canApply) return;
+  if (rosterImportPreview.removed.length && !window.confirm(
+    `This update will remove ${rosterImportPreview.removed.length} student(s) who are absent from Group A/B in the workbook. Continue?`
+  )) return;
+  const button = $("#apply-roster-import");
+  button.disabled = true;
+  message("roster-import-message", "Creating a backup and updating the roster…");
+  try {
+    const result = await rosterImportRequest("/api/roster-import/apply", rosterImportFile, {expectedRevision: rosterImportPreview.revision});
+    await loadState();
+    renderAll();
+    cancelRosterImport();
+    message("f-message", `Roster updated: ${result.summary.added.length} added, ${result.summary.updated.length} updated, ${result.summary.removed.length} removed, and ${result.accountsCreated} accounts created.`);
+  } catch (error) {
+    message("roster-import-message", error.status === 409 ? `${error.message} Choose the file again to review the latest data.` : error.message);
+    button.disabled = false;
+  }
 }
 
 function formatBytes(bytes) {
@@ -761,6 +867,10 @@ function bindEvents() {
   ["#v-group", "#v-sport", "#v-lift", "#v-status"].forEach(id => $(id).addEventListener("change", renderReview));
   $("#approve-visible").addEventListener("click", async () => { const visible = renderReview().filter(s => s.status === "pending"); visible.forEach(s => { const input = $(`[data-manual="${CSS.escape(s.id)}"]`); s.manualMax = Number(input?.value || s.suggestedMax); s.status = "approved"; const athlete = state.athletes.find(a => a.id === s.athleteId); if (athlete) { athlete.projectedMaxes ||= {}; athlete.projectedMaxes[s.lift] = s.manualMax; } }); await saveState(); renderAll(); });
   $("#add-athlete").addEventListener("click", () => $("#athlete-form").hidden = !$("#athlete-form").hidden); $("#save-athlete").addEventListener("click", addAthlete);
+  $("#update-roster").addEventListener("click", () => { $("#roster-file").value = ""; $("#roster-file").click(); });
+  $("#roster-file").addEventListener("change", event => { const [file] = event.target.files; if (file) previewRosterImport(file); });
+  $("#cancel-roster-import").addEventListener("click", cancelRosterImport);
+  $("#apply-roster-import").addEventListener("click", applyRosterImport);
   $("#add-class").addEventListener("click", addClassGroup); $("#add-sport").addEventListener("click", addSport); $("#add-sub").addEventListener("click", addSportGroup); $("#sub-sport").addEventListener("change", renderRosterSetup);
   $("#edit-roster").addEventListener("click", () => { rosterEditing = !rosterEditing; selectedAthletes.clear(); $("#edit-roster").textContent = rosterEditing ? "Done editing" : "Edit roster"; renderRoster(); });
   $("#remove-athletes").addEventListener("click", removeSelectedAthletes); $("#select-all").addEventListener("change", event => { visibleRosterAthletes().forEach(a => event.target.checked ? selectedAthletes.add(a.id) : selectedAthletes.delete(a.id)); renderRoster(); $("#select-all").checked = event.target.checked; });

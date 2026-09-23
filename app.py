@@ -18,6 +18,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from db import Database, StateConflictError, utcnow
+from roster_import import merge_master_roster, parse_master_roster
 from security import FieldCipher, ensure_setup_token, new_secret_key
 
 
@@ -177,6 +178,17 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     def client_hash() -> str:
         return cipher.digest(request.remote_addr or "unknown")
+
+    def uploaded_roster() -> dict:
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            raise ValueError("Choose an .xlsx master roster file")
+        if not uploaded.filename.casefold().endswith(".xlsx"):
+            raise ValueError("The master roster must be an .xlsx file")
+        contents = uploaded.read()
+        if not contents:
+            raise ValueError("The uploaded roster file is empty")
+        return parse_master_roster(contents)
 
     @app.get("/")
     def index():
@@ -350,6 +362,49 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"error": str(exc)}), 400
         db.audit("state_updated", g.admin, client_hash(), "Planner data saved")
         return jsonify({"ok": True, "savedAt": utcnow(), "revision": new_revision})
+
+    @app.post("/api/roster-import/preview")
+    @login_required
+    def roster_import_preview():
+        try:
+            parsed = uploaded_roster()
+            _, summary = merge_master_roster(db.get_state(), parsed)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True, "summary": summary})
+
+    @app.post("/api/roster-import/apply")
+    @login_required
+    def roster_import_apply():
+        try:
+            parsed = uploaded_roster()
+            current_state = db.get_state()
+            expected_revision = int(request.form.get("expectedRevision", ""))
+            if expected_revision != current_state["revision"]:
+                raise StateConflictError(current_state["revision"])
+            merged, summary = merge_master_roster(current_state, parsed)
+            if summary["issues"]:
+                return jsonify({"error": "The roster has conflicts that must be resolved before it can be applied.", "summary": summary}), 400
+            backup = db.create_backup(instance / "backups")
+            new_revision = db.replace_state(merged, expected_revision)
+            accounts_created = db.sync_student_accounts(
+                lambda password: generate_password_hash(password, method="scrypt")
+            )
+        except StateConflictError as exc:
+            return jsonify({"error": "Planner data changed after this preview. Preview the roster again.", "revision": exc.current_revision}), 409
+        except (ValueError, TypeError, KeyError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        db.audit(
+            "master_roster_imported", g.admin, client_hash(),
+            f"added:{len(summary['added'])} updated:{len(summary['updated'])} removed:{len(summary['removed'])}",
+        )
+        return jsonify({
+            "ok": True,
+            "summary": summary,
+            "revision": new_revision,
+            "accountsCreated": accounts_created,
+            "backup": backup.name,
+        })
 
     @app.put("/api/attendance")
     @login_required
