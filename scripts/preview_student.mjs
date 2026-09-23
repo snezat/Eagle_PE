@@ -37,6 +37,18 @@ const previewStudents = [
   {id: 3, athleteId: "preview-student-3", athleteName: "Jordan Smith", username: "jordansmith", password: "smith", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
 ];
 
+function previewRosterSummary() {
+  return {
+    workbookAthletes: 153, resultingAthletes: 153, matched: 142,
+    added: ["Abdul Hadi", "Aiden Guillory", "Avery Bouy"],
+    updated: [{name: "Bryce MacMenamin", changes: ["teacher", "maxes"]}],
+    unchanged: [], removed: [],
+    aliasMatches: [{workbookName: "Bryce (Track) MacMenamin", currentName: "Bryce MacMenamin"}],
+    maxesAdded: 47, maxesUpdated: 19, sportsAdded: 12, issues: [], canApply: true,
+    revision: coachState.revision,
+  };
+}
+
 function html(file) {
   return fs.readFileSync(path.join(root, "templates", file), "utf8")
     .replaceAll("{{ csrf }}", "preview-token")
@@ -82,6 +94,20 @@ const server = http.createServer((request, response) => {
   if (request.method === "POST" && url.pathname === "/logout") return send(response, 302, "", "text/plain", {Location: "/"});
   if (request.method === "GET" && url.pathname === "/app") return send(response, 200, html("app.html"));
   if (request.method === "GET" && url.pathname === "/api/state") return send(response, 200, JSON.stringify(coachState), "application/json");
+  if (request.method === "POST" && url.pathname === "/api/roster-import/preview") {
+    request.resume();
+    request.on("end", () => send(response, 200, JSON.stringify({ok: true, summary: previewRosterSummary()}), "application/json"));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/roster-import/apply") {
+    request.resume();
+    request.on("end", () => {
+      const summary = previewRosterSummary();
+      coachState.revision += 1;
+      return send(response, 200, JSON.stringify({ok: true, summary, revision: coachState.revision, accountsCreated: summary.added.length, backup: "preview-backup.sqlite3"}), "application/json");
+    });
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/app-settings") return send(response, 200, JSON.stringify({
     health: {status: "healthy", database: "ok", databaseBytes: 339968, diskFreeBytes: 80e9, diskTotalBytes: 120e9, pythonVersion: "3.12", operatingSystem: "Preview", processStartedAt: new Date().toISOString(), processUptimeSeconds: 3600, serverTime: new Date().toISOString()},
     users: [{id: 1, username: "coach", active: true, createdAt: new Date().toISOString(), lastLoginAt: new Date().toISOString(), current: true}],

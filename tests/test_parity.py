@@ -14,14 +14,17 @@ def test_server_ui_keeps_standalone_feature_parity():
         "tv-groups", "attendance-grid", "assignments", "lift-dropdown", "lift-options",
         "roster", "class-options", "sport-options", "sub-options", "f-sub",
         "settings-users", "add-settings-user", "run-update", "health-status", "password-dialog",
+        "update-roster", "roster-file", "roster-import-preview", "apply-roster-import",
     }
     for element_id in required_template_ids:
         assert f'id="{element_id}"' in template
     assert '<button data-view="review"' not in template
-    for feature in ("priority-workout", "saveAttendance", "groupBySport", "visibleRosterAthletes", "renderLiftDropdown"):
+    for feature in ("priority-workout", "saveAttendance", "groupBySport", "visibleRosterAthletes", "renderLiftDropdown", "previewRosterImport", "applyRosterImport", "attendanceActions", "changeAthleteTrainingGroup", "removeAthleteFromAttendance"):
         assert feature in script
-    for style in ("athletic-eagle-logo.png", ".attendance-grid", ".tv-grid.single", ".subgroup-editor"):
+    for style in ("athletic-eagle-logo.png", ".attendance-grid", ".attendance-actions-menu", ".tv-grid.single", ".subgroup-editor"):
         assert style in styles
+    assert "Use Options to move or remove an athlete" in template
+    assert "Move ${athlete.name}" in script and "Remove ${athlete.name} from the roster" in script
     assert 'minlength="8"' in (ROOT / "templates" / "setup.html").read_text(encoding="utf-8")
     assert 'minlength="15"' not in (ROOT / "templates" / "setup.html").read_text(encoding="utf-8")
 

@@ -245,6 +245,23 @@ class Database:
         if os.name != "nt":
             os.chmod(self.path, 0o600)
 
+    def create_backup(self, directory: str | Path, prefix: str = "roster-import") -> Path:
+        """Create a consistent SQLite backup before a bulk roster change."""
+        destination_directory = Path(directory)
+        destination_directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        destination = destination_directory / f"{prefix}-{timestamp}.sqlite3"
+        source_connection = self.connect()
+        destination_connection = sqlite3.connect(destination)
+        try:
+            source_connection.backup(destination_connection)
+        finally:
+            destination_connection.close()
+            source_connection.close()
+        if os.name != "nt":
+            os.chmod(destination, 0o600)
+        return destination
+
     def admin_count(self) -> int:
         with self.connection() as conn:
             return int(conn.execute("SELECT count(*) FROM admins").fetchone()[0])

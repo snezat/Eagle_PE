@@ -154,12 +154,23 @@ document.querySelector("#student-max-form").addEventListener("submit", async eve
   }
 });
 
-document.querySelector("#student-sports-form").addEventListener("submit", async event => {
+const sportsForm = document.querySelector("#student-sports-form");
+
+sportsForm.addEventListener("change", event => {
+  if (!event.target.matches('input[name="sports"]')) return;
+  const message = document.querySelector("#student-sports-message");
+  message.textContent = "Your sports changed. Submit now to refresh today’s workout.";
+  if (window.confirm("Update your sports and refresh today’s workout plan now?")) sportsForm.requestSubmit();
+});
+
+sportsForm.addEventListener("submit", async event => {
   event.preventDefault();
   const form = event.currentTarget;
   const message = document.querySelector("#student-sports-message");
+  const button = form.querySelector('button[type="submit"]');
   const sports = [...form.querySelectorAll('input[name="sports"]:checked')].map(input => input.value);
-  message.textContent = "Saving…";
+  message.textContent = "Updating sports and today’s workout…";
+  button.disabled = true;
   try {
     const response = await fetch("/api/student/sports", {
       method: "PUT", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
@@ -168,9 +179,11 @@ document.querySelector("#student-sports-form").addEventListener("submit", async 
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not save your sports");
     await loadDashboard();
-    message.textContent = "Sports updated. Today’s assignments are refreshed.";
+    document.querySelector("#student-sports-message").textContent = "Sports updated. Today’s workout is refreshed.";
   } catch (error) {
     message.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 });
 
