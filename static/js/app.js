@@ -20,6 +20,7 @@ let tvMode = "both";
 let attendanceGroup = "Nonfootball Group A";
 let saving = false;
 let saveQueued = false;
+let lastSaveError = "";
 let settingsPoll = null;
 let rosterImportFile = null;
 let rosterImportPreview = null;
@@ -59,6 +60,7 @@ async function loadState() {
 async function saveState() {
   if (saving) { saveQueued = true; return; }
   saving = true;
+  lastSaveError = "";
   $("#save-status").textContent = "Saving securely…";
   try {
     const response = await fetch("/api/state", {
@@ -69,6 +71,7 @@ async function saveState() {
     if (response.status === 401) { location.href = "/"; return false; }
     const result = await response.json();
     if (response.status === 409) {
+      lastSaveError = result.error || "Planner data changed on another screen.";
       await loadState(); renderAll();
       $("#save-status").textContent = "Another screen changed the planner — reloaded latest data";
       return false;
@@ -78,8 +81,10 @@ async function saveState() {
     $("#save-status").textContent = `Saved securely · ${new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}`;
     return true;
   } catch (error) {
+    lastSaveError = error.message || "Save failed";
     $("#save-status").textContent = "Save failed — try again";
     console.error(error);
+    return false;
   } finally {
     saving = false;
     if (saveQueued) { saveQueued = false; saveState(); }
@@ -699,7 +704,7 @@ function renderRoster() {
     if (rosterEditing) { const check = document.createElement("input"); check.type = "checkbox"; check.checked = selectedAthletes.has(athlete.id); check.addEventListener("change", () => check.checked ? selectedAthletes.add(athlete.id) : selectedAthletes.delete(athlete.id)); row.append(cell(check)); }
     const who = document.createElement("div"); const name = document.createElement("div"); name.className = "athlete-name"; name.textContent = athlete.name; const meta = document.createElement("div"); meta.className = "athlete-meta"; meta.textContent = [athlete.grade ? `Grade ${athlete.grade}` : "", athlete.teacher].filter(Boolean).join(" · "); who.append(name, meta); row.append(cell(who));
     if (rosterEditing) {
-      const groupSelect = document.createElement("select"); optionList(groupSelect, state.classGroups, null, athlete.classGroup); groupSelect.addEventListener("change", async () => { athlete.classGroup = groupSelect.value; await saveState(); renderAll(); }); row.append(cell(groupSelect));
+      const groupSelect = document.createElement("select"); optionList(groupSelect, state.classGroups, null, athlete.classGroup); groupSelect.addEventListener("change", async () => { const changed = await changeAthleteTrainingGroup(athlete, groupSelect.value); if (!changed && groupSelect.isConnected) groupSelect.value = athlete.classGroup; }); row.append(cell(groupSelect));
       const checks = document.createElement("div"); checks.className = "checks"; state.sports.forEach(s => { const label = document.createElement("label"), input = document.createElement("input"); input.type = "checkbox"; input.checked = athlete.sports.includes(s); input.addEventListener("change", async () => { athlete.groupBySport ||= {}; athlete.sports = input.checked ? [...new Set([...athlete.sports, s])] : athlete.sports.filter(x => x !== s); if (!input.checked) delete athlete.groupBySport[s]; await saveState(); renderAll(); }); label.append(input, document.createTextNode(s)); checks.append(label); }); row.append(cell(checks));
       const subgroups = document.createElement("div"); subgroups.className = "subgroup-editor"; athlete.groupBySport ||= {};
       athlete.sports.forEach(s => { const label = document.createElement("label"), select = document.createElement("select"); label.append(document.createTextNode(s)); select.append(new Option("Unassigned", ""), ...(state.sportGroups[s] || []).map(name => new Option(name, name))); select.value = athlete.groupBySport[s] || ""; select.addEventListener("change", async () => { select.value ? athlete.groupBySport[s] = select.value : delete athlete.groupBySport[s]; await saveState(); renderRoster(); }); label.append(select); subgroups.append(label); }); row.append(cell(subgroups));
@@ -816,7 +821,7 @@ async function persistAttendanceRosterChange(previousState, successMessage) {
   if (!saved) {
     try { await loadState(); } catch { state = previousState; }
     renderAll();
-    $("#save-status").textContent = "Roster change was not saved — board reloaded";
+    $("#save-status").textContent = `Roster change was not saved${lastSaveError ? `: ${lastSaveError}` : " — board reloaded"}`;
     return false;
   }
   renderAll();
@@ -831,6 +836,9 @@ async function changeAthleteTrainingGroup(athlete, targetGroup) {
   if (!window.confirm(`Move ${athlete.name} from ${currentLabel} to ${targetLabel}? Their account, sports, maxes, and workout history will remain.`)) return false;
   const previousState = structuredClone(state);
   athlete.classGroup = targetGroup;
+  state.attendance.forEach(record => {
+    if (record.athleteId === athlete.id) record.group = targetGroup;
+  });
   return persistAttendanceRosterChange(previousState, `${athlete.name} moved to ${targetLabel}.`);
 }
 

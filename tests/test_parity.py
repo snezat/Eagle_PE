@@ -25,6 +25,7 @@ def test_server_ui_keeps_standalone_feature_parity():
         assert style in styles
     assert "Use Options to move or remove an athlete" in template
     assert "Move ${athlete.name}" in script and "Remove ${athlete.name} from the roster" in script
+    assert "record.athleteId === athlete.id" in script and "record.group = targetGroup" in script
     assert 'minlength="8"' in (ROOT / "templates" / "setup.html").read_text(encoding="utf-8")
     assert 'minlength="15"' not in (ROOT / "templates" / "setup.html").read_text(encoding="utf-8")
 
@@ -39,6 +40,13 @@ def test_public_assets_do_not_embed_roster_seed():
     ])
     assert "ATHLETIC_PE_ROSTER" not in public_text
     assert "arc3-athletes" not in public_text
+
+
+def test_preview_server_supports_coach_state_and_attendance_updates():
+    preview = (ROOT / "scripts" / "preview_student.mjs").read_text(encoding="utf-8")
+    assert 'request.method === "PUT" && url.pathname === "/api/state"' in preview
+    assert 'request.method === "PUT" && url.pathname === "/api/attendance"' in preview
+    assert "Attendance references an invalid athlete or group" in preview
 
 
 def test_startup_and_lxc_files_have_required_safety_guards():

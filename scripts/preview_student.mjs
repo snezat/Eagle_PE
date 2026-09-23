@@ -94,6 +94,34 @@ const server = http.createServer((request, response) => {
   if (request.method === "POST" && url.pathname === "/logout") return send(response, 302, "", "text/plain", {Location: "/"});
   if (request.method === "GET" && url.pathname === "/app") return send(response, 200, html("app.html"));
   if (request.method === "GET" && url.pathname === "/api/state") return send(response, 200, JSON.stringify(coachState), "application/json");
+  if (request.method === "PUT" && url.pathname === "/api/state") {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const payload = JSON.parse(body || "{}");
+      if (payload.revision !== coachState.revision) return send(response, 409, JSON.stringify({error: "Planner data changed on another screen.", revision: coachState.revision}), "application/json");
+      const athleteGroups = new Map((payload.athletes || []).map(athlete => [athlete.id, athlete.classGroup]));
+      const invalidAttendance = (payload.attendance || []).some(record => athleteGroups.get(record.athleteId) !== record.group);
+      if (invalidAttendance) return send(response, 400, JSON.stringify({error: "Attendance references an invalid athlete or group"}), "application/json");
+      const nextRevision = coachState.revision + 1;
+      Object.keys(coachState).forEach(key => delete coachState[key]);
+      Object.assign(coachState, payload, {revision: nextRevision});
+      return send(response, 200, JSON.stringify({ok: true, revision: nextRevision}), "application/json");
+    });
+    return;
+  }
+  if (request.method === "PUT" && url.pathname === "/api/attendance") {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const payload = JSON.parse(body || "{}");
+      coachState.attendance = coachState.attendance.filter(record => !(record.date === payload.date && record.athleteId === payload.athleteId));
+      if (payload.present) coachState.attendance.push({date: payload.date, group: payload.group, athleteId: payload.athleteId, checkedAt: new Date().toISOString()});
+      coachState.revision += 1;
+      return send(response, 200, JSON.stringify({ok: true, revision: coachState.revision}), "application/json");
+    });
+    return;
+  }
   if (request.method === "POST" && url.pathname === "/api/roster-import/preview") {
     request.resume();
     request.on("end", () => send(response, 200, JSON.stringify({ok: true, summary: previewRosterSummary()}), "application/json"));
