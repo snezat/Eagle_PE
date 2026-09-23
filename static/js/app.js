@@ -811,6 +811,92 @@ function updateClock() {
   const now = new Date(); $("#tv-time").textContent = now.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}); $("#tv-day").textContent = now.toLocaleDateString([], {weekday: "long", month: "long", day: "numeric", year: "numeric"});
 }
 
+async function persistAttendanceRosterChange(previousState, successMessage) {
+  const saved = await saveState();
+  if (!saved) {
+    try { await loadState(); } catch { state = previousState; }
+    renderAll();
+    $("#save-status").textContent = "Roster change was not saved — board reloaded";
+    return false;
+  }
+  renderAll();
+  $("#save-status").textContent = successMessage;
+  return true;
+}
+
+async function changeAthleteTrainingGroup(athlete, targetGroup) {
+  if (!state.classGroups.includes(targetGroup) || targetGroup === athlete.classGroup) return false;
+  const currentLabel = athlete.classGroup.replace("Nonfootball ", "");
+  const targetLabel = targetGroup.replace("Nonfootball ", "");
+  if (!window.confirm(`Move ${athlete.name} from ${currentLabel} to ${targetLabel}? Their account, sports, maxes, and workout history will remain.`)) return false;
+  const previousState = structuredClone(state);
+  athlete.classGroup = targetGroup;
+  return persistAttendanceRosterChange(previousState, `${athlete.name} moved to ${targetLabel}.`);
+}
+
+async function removeAthleteFromAttendance(athlete) {
+  if (!window.confirm(`Remove ${athlete.name} from the roster? Their account and associated workout records will also be removed.`)) return false;
+  const previousState = structuredClone(state);
+  state.athletes = state.athletes.filter(item => item.id !== athlete.id);
+  state.prescriptions = state.prescriptions.filter(item => item.athleteId !== athlete.id);
+  state.suggestions = state.suggestions.filter(item => item.athleteId !== athlete.id);
+  state.attendance = state.attendance.filter(item => item.athleteId !== athlete.id);
+  return persistAttendanceRosterChange(previousState, `${athlete.name} was removed from the roster.`);
+}
+
+function attendanceActions(athlete) {
+  const menu = document.createElement("details");
+  menu.className = "attendance-actions";
+  const trigger = document.createElement("summary");
+  trigger.textContent = "Options";
+  trigger.setAttribute("aria-label", `Options for ${athlete.name}`);
+  const panel = document.createElement("div");
+  panel.className = "attendance-actions-menu";
+
+  const change = document.createElement("button");
+  change.type = "button";
+  change.textContent = "Change training group";
+  const groupField = document.createElement("label");
+  groupField.hidden = true;
+  const groupLabel = document.createElement("span");
+  groupLabel.textContent = "Select a new group";
+  const groupSelect = document.createElement("select");
+  groupSelect.setAttribute("aria-label", `New training group for ${athlete.name}`);
+  groupSelect.append(new Option("Choose a group…", ""));
+  state.classGroups.filter(group => group !== athlete.classGroup).forEach(group => {
+    groupSelect.append(new Option(group.replace("Nonfootball ", ""), group));
+  });
+  groupField.append(groupLabel, groupSelect);
+  change.addEventListener("click", event => {
+    event.stopPropagation();
+    groupField.hidden = !groupField.hidden;
+    if (!groupField.hidden) groupSelect.focus();
+  });
+  groupSelect.addEventListener("change", async () => {
+    const targetGroup = groupSelect.value;
+    if (!targetGroup) return;
+    const changed = await changeAthleteTrainingGroup(athlete, targetGroup);
+    if (!changed && groupSelect.isConnected) groupSelect.value = "";
+  });
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "danger";
+  remove.textContent = "Remove from roster";
+  remove.addEventListener("click", async event => {
+    event.stopPropagation();
+    await removeAthleteFromAttendance(athlete);
+  });
+
+  menu.addEventListener("toggle", () => {
+    if (!menu.open) return;
+    $$(".attendance-actions[open]").filter(item => item !== menu).forEach(item => { item.open = false; });
+  });
+  panel.append(change, groupField, remove);
+  menu.append(trigger, panel);
+  return menu;
+}
+
 function renderAttendance() {
   const dateInput = $("#attendance-date");
   dateInput.value ||= today();
@@ -825,7 +911,8 @@ function renderAttendance() {
   grid.replaceChildren();
   const present = new Set(state.attendance.filter(record => record.date === date && record.group === attendanceGroup).map(record => record.athleteId));
   athletes.forEach(athlete => {
-    const person = document.createElement("label"); person.className = `attendance-person${present.has(athlete.id) ? " checked" : ""}`;
+    const person = document.createElement("div"); person.className = `attendance-person${present.has(athlete.id) ? " checked" : ""}`;
+    const attendance = document.createElement("label"); attendance.className = "attendance-check";
     const check = document.createElement("input"); check.type = "checkbox"; check.checked = present.has(athlete.id); check.setAttribute("aria-label", `${athlete.name} present`);
     const name = document.createElement("span"); name.textContent = athlete.name;
     check.addEventListener("change", async () => {
@@ -844,7 +931,9 @@ function renderAttendance() {
         check.disabled = false;
       }
     });
-    person.append(check, name); grid.append(person);
+    attendance.append(check, name);
+    person.append(attendance, attendanceActions(athlete));
+    grid.append(person);
   });
   if (!athletes.length) { const empty = document.createElement("div"); empty.className = "attendance-empty"; empty.textContent = "No athletes are assigned to this group."; grid.append(empty); }
   $("#attendance-count").textContent = `${present.size} / ${athletes.length} present`;
