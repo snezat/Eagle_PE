@@ -88,7 +88,8 @@ def test_new_max_wins_across_duplicate_sport_rows_and_original_only_fills_missin
     ]), parsed)
     parker = merged["athletes"][0]
     assert parker["maxes"] == {"Bench": 200, "Back Squat": 275}
-    assert set(parker["sports"]) == {"Cross Country", "Track & Field"}
+    assert parker["sports"] == ["Track & Cross"]
+    assert merged["sports"] == ["Baseball", "Track & Cross"]
     assert summary["issues"] == []
 
 

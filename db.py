@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -12,6 +13,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from security import FieldCipher
+from sport_names import (
+    TRACK_CROSS,
+    canonical_sport_name,
+    canonicalize_sport_names,
+    normalize_state_sports,
+)
 
 
 SCHEMA = """
@@ -241,9 +248,65 @@ class Database:
             student_columns = {row["name"] for row in conn.execute("PRAGMA table_info(student_accounts)")}
             if "password_enc" not in student_columns:
                 conn.execute("ALTER TABLE student_accounts ADD COLUMN password_enc BLOB")
+            self._merge_legacy_track_cross_sports(conn)
             conn.execute("PRAGMA optimize")
         if os.name != "nt":
             os.chmod(self.path, 0o600)
+
+    def _merge_legacy_track_cross_sports(self, conn: sqlite3.Connection) -> None:
+        """Collapse legacy track/cross-country rows without losing memberships or assignments."""
+        rows = conn.execute("SELECT id,name,sort_order FROM sports ORDER BY sort_order,id").fetchall()
+        matching = [row for row in rows if canonical_sport_name(row["name"]) == TRACK_CROSS]
+        if not matching:
+            return
+        target = next((row for row in matching if row["name"] == TRACK_CROSS), matching[0])
+        target_id = target["id"]
+        legacy = [row for row in matching if row["id"] != target_id]
+        changed = target["name"] != TRACK_CROSS or bool(legacy)
+        if target["name"] != TRACK_CROSS:
+            conn.execute("UPDATE sports SET name=? WHERE id=?", (TRACK_CROSS, target_id))
+        conn.execute(
+            "UPDATE sports SET sort_order=? WHERE id=?",
+            (min(row["sort_order"] for row in matching), target_id),
+        )
+        if not legacy:
+            if changed:
+                conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
+            return
+
+        legacy_ids = [row["id"] for row in legacy]
+        placeholders = ",".join("?" for _ in legacy_ids)
+        for row in conn.execute(
+            f"SELECT sport_id,name FROM sport_groups WHERE sport_id IN ({placeholders})", legacy_ids
+        ):
+            conn.execute(
+                "INSERT OR IGNORE INTO sport_groups(sport_id,name) VALUES(?,?)",
+                (target_id, row["name"]),
+            )
+
+        memberships = conn.execute(
+            f"SELECT athlete_id,sport_id,subgroup_enc FROM athlete_sports WHERE sport_id=? OR sport_id IN ({placeholders}) ORDER BY CASE WHEN sport_id=? THEN 0 ELSE 1 END,sport_id",
+            (target_id, *legacy_ids, target_id),
+        ).fetchall()
+        memberships_by_athlete: dict[str, list[sqlite3.Row]] = {}
+        for membership in memberships:
+            memberships_by_athlete.setdefault(membership["athlete_id"], []).append(membership)
+        for athlete_id, athlete_memberships in memberships_by_athlete.items():
+            chosen = athlete_memberships[0]["subgroup_enc"]
+            for membership in athlete_memberships:
+                if membership["subgroup_enc"] and self.cipher.decrypt(membership["subgroup_enc"]):
+                    chosen = membership["subgroup_enc"]
+                    break
+            conn.execute(
+                "INSERT OR REPLACE INTO athlete_sports(athlete_id,sport_id,subgroup_enc) VALUES(?,?,?)",
+                (athlete_id, target_id, chosen),
+            )
+        conn.execute(
+            f"UPDATE assignments SET sport_id=? WHERE sport_id IN ({placeholders})",
+            (target_id, *legacy_ids),
+        )
+        conn.execute(f"DELETE FROM sports WHERE id IN ({placeholders})", legacy_ids)
+        conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
 
     def create_backup(self, directory: str | Path, prefix: str = "roster-import") -> Path:
         """Create a consistent SQLite backup before a bulk roster change."""
@@ -348,7 +411,7 @@ class Database:
 
     def align_sport_training_groups(self) -> int:
         """Keep the two nonfootball groups aligned with their displayed sport groupings."""
-        group_a_sports = {"track", "track & field", "cross country", "basketball"}
+        group_a_sports = {TRACK_CROSS.casefold(), "basketball"}
         group_b_sports = {"baseball", "soccer"}
         changed = 0
         with self.transaction() as conn:
@@ -557,8 +620,9 @@ class Database:
     def set_student_sports(self, athlete_id: str, sports: list[str], effective_date: str) -> list[str]:
         if not isinstance(sports, list) or len(sports) > 100 or any(not isinstance(name, str) for name in sports):
             raise ValueError("Sports must be a list")
-        normalized = list(dict.fromkeys(name.strip() for name in sports if name.strip()))
-        if len(normalized) != len(sports) or any(len(name) > 100 for name in normalized):
+        stripped = [name.strip() for name in sports if name.strip()]
+        normalized = canonicalize_sport_names(stripped)
+        if len(stripped) != len(sports) or any(len(name) > 100 for name in normalized):
             raise ValueError("Sports contain invalid or duplicate values")
         try:
             if len(effective_date) != 10:
@@ -783,6 +847,7 @@ class Database:
             }
 
     def replace_state(self, state: dict[str, Any], expected_revision: int) -> int:
+        state = normalize_state_sports(copy.deepcopy(state))
         _validate_state(state)
         now = utcnow()
         with self.transaction() as conn:

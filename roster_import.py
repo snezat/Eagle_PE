@@ -11,6 +11,8 @@ from typing import Any, BinaryIO
 
 from openpyxl import load_workbook
 
+from sport_names import TRACK_CROSS, canonical_sport_name, normalize_state_sports
+
 
 REQUIRED_HEADERS = {
     "Teacher", "Sport", "Last Name", "First Name", "Grade",
@@ -45,10 +47,10 @@ def _positive_number(value: Any) -> float | None:
 
 
 def _class_group(sports: list[str]) -> str:
-    values = set(sports)
+    values = {canonical_sport_name(sport) for sport in sports}
     if "Football" in values:
         return "Football"
-    if values.intersection({"Track", "Track & Field", "Cross Country", "Basketball"}):
+    if values.intersection({TRACK_CROSS, "Basketball"}):
         return "Nonfootball Group A"
     if values.intersection({"Baseball", "Soccer"}):
         return "Nonfootball Group B"
@@ -94,7 +96,7 @@ def parse_master_roster(source: bytes | BinaryIO) -> dict[str, Any]:
         })
         teacher = str(row[headers["Teacher"]] or "").strip()
         grade = str(row[headers["Grade"]] or "").strip()
-        sport = str(row[headers["Sport"]] or "").strip()
+        sport = canonical_sport_name(str(row[headers["Sport"]] or ""))
         if teacher:
             athlete["teachers"].add(teacher)
         if grade:
@@ -142,6 +144,7 @@ def parse_master_roster(source: bytes | BinaryIO) -> dict[str, Any]:
 
 def merge_master_roster(state: dict[str, Any], parsed: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     merged = copy.deepcopy(state)
+    normalize_state_sports(merged)
     current_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     current_by_alias: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for athlete in merged.get("athletes", []):
