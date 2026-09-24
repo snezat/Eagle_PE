@@ -11,7 +11,7 @@ def test_server_ui_keeps_standalone_feature_parity():
     script = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
     styles = (ROOT / "static" / "css" / "app.css").read_text(encoding="utf-8")
     required_template_ids = {
-        "tv-groups", "attendance-grid", "assignments", "lift-dropdown", "lift-options",
+        "tv-groups", "attendance-grid", "attendance-sport-summary", "assignments", "lift-dropdown", "lift-options",
         "roster", "class-options", "sport-options", "sub-options", "f-sub",
         "settings-users", "add-settings-user", "run-update", "health-status", "password-dialog",
         "update-roster", "roster-file", "roster-import-preview", "apply-roster-import",
@@ -19,9 +19,9 @@ def test_server_ui_keeps_standalone_feature_parity():
     for element_id in required_template_ids:
         assert f'id="{element_id}"' in template
     assert '<button data-view="review"' not in template
-    for feature in ("priority-workout", "saveAttendance", "groupBySport", "visibleRosterAthletes", "renderLiftDropdown", "previewRosterImport", "applyRosterImport", "attendanceActions", "changeAthleteTrainingGroup", "removeAthleteFromAttendance"):
+    for feature in ("priority-workout", "saveAttendance", "groupBySport", "visibleRosterAthletes", "renderLiftDropdown", "previewRosterImport", "applyRosterImport", "attendanceActions", "attendanceSportsFor", "renderAttendanceSportSummary", "changeAthleteTrainingGroup", "removeAthleteFromAttendance"):
         assert feature in script
-    for style in ("athletic-eagle-logo.png", ".attendance-grid", ".attendance-actions-menu", ".tv-grid.single", ".subgroup-editor"):
+    for style in ("athletic-eagle-logo.png", ".attendance-grid", ".attendance-sport-total", ".attendance-actions-menu", ".tv-grid.single", ".subgroup-editor"):
         assert style in styles
     assert "Use Options to move or remove an athlete" in template
     assert "Move ${athlete.name}" in script and "Remove ${athlete.name} from the roster" in script
