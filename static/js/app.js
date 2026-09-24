@@ -945,6 +945,36 @@ function attendanceActions(athlete) {
   return menu;
 }
 
+function attendanceSportsFor(athlete) {
+  const groupSports = attendanceGroup === "Nonfootball Group A"
+    ? ["Track", "Track & Field", "Cross Country", "Basketball"]
+    : attendanceGroup === "Nonfootball Group B" ? ["Baseball", "Soccer"] : state.sports;
+  const matches = groupSports.filter(sport => athlete.sports.includes(sport));
+  return matches.length ? matches : athlete.sports.length ? athlete.sports : ["No sport"];
+}
+
+function renderAttendanceSportSummary(athletes, date) {
+  const present = new Set(state.attendance.filter(record => record.date === date && record.group === attendanceGroup).map(record => record.athleteId));
+  const totals = new Map();
+  athletes.forEach(athlete => attendanceSportsFor(athlete).forEach(sport => {
+    const current = totals.get(sport) || {roster: 0, present: 0};
+    current.roster += 1;
+    if (present.has(athlete.id)) current.present += 1;
+    totals.set(sport, current);
+  }));
+  const host = $("#attendance-sport-summary");
+  host.replaceChildren();
+  [...totals.entries()].forEach(([sport, counts]) => {
+    const item = document.createElement("div");
+    item.className = `attendance-sport-total ${sportClass(sport)}`;
+    const label = document.createElement("span"); label.textContent = sport;
+    const value = document.createElement("strong"); value.textContent = `${counts.present}/${counts.roster}`;
+    const description = document.createElement("small"); description.textContent = "checked in";
+    item.append(label, value, description); host.append(item);
+  });
+  host.hidden = totals.size === 0;
+}
+
 function renderAttendance() {
   const dateInput = $("#attendance-date");
   dateInput.value ||= today();
@@ -959,10 +989,14 @@ function renderAttendance() {
   grid.replaceChildren();
   const present = new Set(state.attendance.filter(record => record.date === date && record.group === attendanceGroup).map(record => record.athleteId));
   athletes.forEach(athlete => {
-    const person = document.createElement("div"); person.className = `attendance-person${present.has(athlete.id) ? " checked" : ""}`;
+    const athleteSports = attendanceSportsFor(athlete);
+    const person = document.createElement("div"); person.className = `attendance-person ${sportClass(athleteSports[0])}${present.has(athlete.id) ? " checked" : ""}`;
     const attendance = document.createElement("label"); attendance.className = "attendance-check";
     const check = document.createElement("input"); check.type = "checkbox"; check.checked = present.has(athlete.id); check.setAttribute("aria-label", `${athlete.name} present`);
+    const identity = document.createElement("span"); identity.className = "attendance-identity";
     const name = document.createElement("span"); name.textContent = athlete.name;
+    const sport = document.createElement("small"); sport.textContent = athleteSports.join(" / ");
+    identity.append(name, sport);
     check.addEventListener("change", async () => {
       check.disabled = true;
       state.attendance = state.attendance.filter(record => !(record.date === date && record.athleteId === athlete.id));
@@ -970,6 +1004,7 @@ function renderAttendance() {
       person.classList.toggle("checked", check.checked);
       const count = athletes.filter(item => state.attendance.some(record => record.date === date && record.group === attendanceGroup && record.athleteId === item.id)).length;
       $("#attendance-count").textContent = `${count} / ${athletes.length} present`;
+      renderAttendanceSportSummary(athletes, date);
       try {
         await saveAttendance(date, attendanceGroup, athlete.id, check.checked);
         $("#save-status").textContent = `Attendance saved · ${new Date().toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}`;
@@ -979,12 +1014,13 @@ function renderAttendance() {
         check.disabled = false;
       }
     });
-    attendance.append(check, name);
+    attendance.append(check, identity);
     person.append(attendance, attendanceActions(athlete));
     grid.append(person);
   });
   if (!athletes.length) { const empty = document.createElement("div"); empty.className = "attendance-empty"; empty.textContent = "No athletes are assigned to this group."; grid.append(empty); }
   $("#attendance-count").textContent = `${present.size} / ${athletes.length} present`;
+  renderAttendanceSportSummary(athletes, date);
   $$('[data-attendance-group]').forEach(button => button.classList.toggle("active", button.dataset.attendanceGroup === attendanceGroup));
 }
 
