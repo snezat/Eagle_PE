@@ -1,7 +1,7 @@
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const state = { dashboard: null, date: localDate() };
 const GROUP_LABELS = {
-  "Nonfootball Group A": "G:A - Track / Basketball",
+  "Nonfootball Group A": "G:A - Track & Cross / Basketball",
   "Nonfootball Group B": "G:B - Baseball / Soccer",
 };
 

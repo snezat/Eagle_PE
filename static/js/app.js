@@ -13,8 +13,10 @@ const today = () => {
   return date.toISOString().slice(0, 10);
 };
 const initialState = {sports: [], sportGroups: {}, classGroups: [], athletes: [], assignments: [], prescriptions: [], suggestions: [], attendance: [], liftLibrary: [], revision: 0};
+const TRACK_CROSS = "Track & Cross";
+const TRACK_CROSS_ALIASES = new Set(["track", "track & field", "track and field", "cross country", "cross-country", "track & cross", "track and cross"]);
 const GROUP_LABELS = {
-  "Nonfootball Group A": "G:A - Track / Basketball",
+  "Nonfootball Group A": "G:A - Track & Cross / Basketball",
   "Nonfootball Group B": "G:B - Baseball / Soccer",
 };
 let state = structuredClone(initialState);
@@ -31,6 +33,7 @@ let rosterImportFile = null;
 let rosterImportPreview = null;
 
 function groupLabel(value) { return GROUP_LABELS[value] || value; }
+function canonicalSportName(value) { return TRACK_CROSS_ALIASES.has(value.trim().toLowerCase().replace(/\s+/g, " ")) ? TRACK_CROSS : value.trim(); }
 
 function optionList(select, items, allLabel = null, chosen = null, labeler = value => value) {
   select.replaceChildren();
@@ -772,7 +775,7 @@ async function addClassGroup() {
 }
 
 async function addSport() {
-  const name = $("#new-sport").value.trim();
+  const name = canonicalSportName($("#new-sport").value);
   if (!name || state.sports.some(value => value.toLowerCase() === name.toLowerCase())) { message("f-message", name ? "That sport already exists." : "Enter a sport name."); return; }
   state.sports.push(name); state.sportGroups ||= {}; state.sportGroups[name] = []; $("#new-sport").value = ""; await saveState(); renderAll();
 }
@@ -947,7 +950,7 @@ function attendanceActions(athlete) {
 
 function attendanceSportsFor(athlete) {
   const groupSports = attendanceGroup === "Nonfootball Group A"
-    ? ["Track", "Track & Field", "Cross Country", "Basketball"]
+    ? ["Track & Cross", "Basketball"]
     : attendanceGroup === "Nonfootball Group B" ? ["Baseball", "Soccer"] : state.sports;
   const matches = groupSports.filter(sport => athlete.sports.includes(sport));
   return matches.length ? matches : athlete.sports.length ? athlete.sports : ["No sport"];

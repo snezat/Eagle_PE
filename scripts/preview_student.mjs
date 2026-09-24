@@ -10,7 +10,7 @@ const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, 
 const actual = {Bench: 200, "Back Squat": 300, "Power Clean": 185};
 const projected = {...actual};
 const liftLibrary = ["Bench", "Back Squat", "Power Clean", "Deadlift"];
-const availableSports = ["Football", "Basketball", "Baseball", "Soccer", "Track & Field", "Cross Country"];
+const availableSports = ["Football", "Basketball", "Baseball", "Soccer", "Track & Cross"];
 let selectedSports = ["Football"];
 let activePreviewAthleteId = null;
 const workouts = [
@@ -25,7 +25,7 @@ const coachState = {
   sports: availableSports,
   sportGroups: Object.fromEntries(availableSports.map(sport => [sport, []])),
   athletes: [
-    {id: "preview-student-1", name: "Avery Johnson", grade: "10", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Track & Field"], groupBySport: {}, subgroup: "", maxes: {Bench: 185}, projectedMaxes: {Bench: 195}, overrides: {}},
+    {id: "preview-student-1", name: "Avery Johnson", grade: "10", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Track & Cross"], groupBySport: {}, subgroup: "", maxes: {Bench: 185}, projectedMaxes: {Bench: 195}, overrides: {}},
     {id: "preview-student-2", name: "Maya O'Neil", grade: "11", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Basketball"], groupBySport: {}, subgroup: "", maxes: {Bench: 125}, projectedMaxes: {Bench: 130}, overrides: {}},
     {id: "preview-student-3", name: "Jordan Smith", grade: "9", teacher: "Coach", classGroup: "Nonfootball Group B", sports: ["Baseball"], groupBySport: {}, subgroup: "", maxes: {Bench: 145}, projectedMaxes: {Bench: 155}, overrides: {}},
   ],
