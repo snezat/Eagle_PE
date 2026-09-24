@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import secrets
 import shutil
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -20,6 +22,70 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from db import Database, StateConflictError, utcnow
 from roster_import import merge_master_roster, parse_master_roster
 from security import FieldCipher, ensure_setup_token, new_secret_key
+
+
+def _add_missing_prescriptions_for_new_athletes(
+    state: dict, athlete_ids: set[str], effective_date: str
+) -> int:
+    """Attach newly rostered athletes to matching current and future assignments."""
+    if not athlete_ids:
+        return 0
+    existing = {
+        (item.get("assignmentId"), item.get("athleteId"))
+        for item in state.get("prescriptions", [])
+        if isinstance(item, dict)
+    }
+    created = 0
+    assignments = [
+        item for item in state.get("assignments", [])
+        if isinstance(item, dict) and str(item.get("date", "")) >= effective_date
+    ]
+    for athlete in state.get("athletes", []):
+        if not isinstance(athlete, dict) or athlete.get("id") not in athlete_ids:
+            continue
+        sports = set(athlete.get("sports") or [])
+        for assignment in assignments:
+            key = (assignment.get("id"), athlete["id"])
+            eligible = (
+                assignment.get("group") == athlete.get("classGroup")
+                and (assignment.get("sport") in (None, "", "all") or assignment.get("sport") in sports)
+            )
+            if not eligible or key in existing:
+                continue
+            lift = str(assignment.get("lift", ""))
+            max_value = (
+                (athlete.get("overrides") or {}).get(lift)
+                or (athlete.get("projectedMaxes") or {}).get(lift)
+                or (athlete.get("maxes") or {}).get(lift)
+            )
+            prescribed_load = (
+                math.floor(float(max_value) * float(assignment.get("percent", 0)) / 100 / 5 + 0.5) * 5
+                if max_value else None
+            )
+            state.setdefault("prescriptions", []).append({
+                "id": f"roster-{uuid.uuid4().hex}",
+                "assignmentId": assignment["id"],
+                "athleteId": athlete["id"],
+                "athleteName": athlete.get("name", ""),
+                "group": assignment.get("group", ""),
+                "sports": list(athlete.get("sports") or []),
+                "lift": lift,
+                "projectedMaxUsed": max_value or None,
+                "prescribedLoad": prescribed_load,
+                "sets": assignment.get("sets"),
+                "reps": assignment.get("reps"),
+                "expected": assignment.get("expected"),
+                "completedLoad": "",
+                "burnoutReps": "",
+                "note": "",
+                "submitted": False,
+                "loadMismatch": False,
+                "needsReview": False,
+                "isIndividualOverride": False,
+            })
+            existing.add(key)
+            created += 1
+    return created
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -71,6 +137,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     cipher = FieldCipher(instance)
     db = Database(app.config["DATABASE"], cipher)
     db.initialize()
+    db.align_sport_training_groups()
     if app.config["ENABLE_TEST_STUDENT"] and not app.config.get("TESTING"):
         db.ensure_test_student(generate_password_hash("test", method="scrypt"))
     db.sync_student_accounts(lambda password: generate_password_hash(password, method="scrypt"))
@@ -354,14 +421,24 @@ def create_app(test_config: dict | None = None) -> Flask:
             revision = payload.get("revision")
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
                 raise ValueError("A valid state revision is required")
+            existing_ids = {athlete["id"] for athlete in db.get_state().get("athletes", [])}
+            submitted_ids = {
+                athlete.get("id") for athlete in payload.get("athletes", []) if isinstance(athlete, dict)
+            }
+            prescriptions_created = _add_missing_prescriptions_for_new_athletes(
+                payload, submitted_ids - existing_ids, datetime.now().date().isoformat()
+            )
             new_revision = db.replace_state(payload, revision)
-            db.sync_student_accounts(lambda password: generate_password_hash(password, method="scrypt"))
+            accounts_created = db.sync_student_accounts(lambda password: generate_password_hash(password, method="scrypt"))
         except StateConflictError as exc:
             return jsonify({"error": "Planner data changed on another screen. Reload and try again.", "revision": exc.current_revision}), 409
         except (ValueError, TypeError, KeyError) as exc:
             return jsonify({"error": str(exc)}), 400
         db.audit("state_updated", g.admin, client_hash(), "Planner data saved")
-        return jsonify({"ok": True, "savedAt": utcnow(), "revision": new_revision})
+        return jsonify({
+            "ok": True, "savedAt": utcnow(), "revision": new_revision,
+            "accountsCreated": accounts_created, "prescriptionsCreated": prescriptions_created,
+        })
 
     @app.post("/api/roster-import/preview")
     @login_required
@@ -385,6 +462,11 @@ def create_app(test_config: dict | None = None) -> Flask:
             merged, summary = merge_master_roster(current_state, parsed)
             if summary["issues"]:
                 return jsonify({"error": "The roster has conflicts that must be resolved before it can be applied.", "summary": summary}), 400
+            existing_ids = {athlete["id"] for athlete in current_state.get("athletes", [])}
+            merged_ids = {athlete["id"] for athlete in merged.get("athletes", [])}
+            _add_missing_prescriptions_for_new_athletes(
+                merged, merged_ids - existing_ids, datetime.now().date().isoformat()
+            )
             backup = db.create_backup(instance / "backups")
             new_revision = db.replace_state(merged, expected_revision)
             accounts_created = db.sync_student_accounts(
@@ -463,6 +545,22 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "available": bool(app.config["UPDATER_ENABLED"]),
                 **update_status,
             },
+        })
+
+    @app.post("/api/app-settings/students/sync")
+    @login_required
+    def sync_student_accounts():
+        accounts_created = db.sync_student_accounts(
+            lambda password: generate_password_hash(password, method="scrypt")
+        )
+        db.audit(
+            "student_accounts_synced", g.admin, client_hash(),
+            f"created:{accounts_created}",
+        )
+        return jsonify({
+            "ok": True,
+            "accountsCreated": accounts_created,
+            "students": db.list_student_accounts(),
         })
 
     @app.put("/api/app-settings/users/<int:user_id>/password")

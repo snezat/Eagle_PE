@@ -10,8 +10,9 @@ const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, 
 const actual = {Bench: 200, "Back Squat": 300, "Power Clean": 185};
 const projected = {...actual};
 const liftLibrary = ["Bench", "Back Squat", "Power Clean", "Deadlift"];
-const availableSports = ["Football", "Basketball", "Baseball", "Track & Field"];
+const availableSports = ["Football", "Basketball", "Baseball", "Soccer", "Track & Field", "Cross Country"];
 let selectedSports = ["Football"];
+let activePreviewAthleteId = null;
 const workouts = [
   {id: "preview-bench", date, lift: "Bench", percent: 75, sets: 2, reps: 5, expectedReps: 8, prescribedLoad: 150, projectedMaxUsed: 200, burnoutReps: null, submitted: false, locked: false, notes: "Final set is the burnout set."},
   {id: "preview-squat", date, lift: "Back Squat", percent: 75, sets: 2, reps: 5, expectedReps: 8, prescribedLoad: 225, projectedMaxUsed: 300, burnoutReps: null, submitted: false, locked: false, notes: "Final set is the burnout set."},
@@ -24,7 +25,7 @@ const coachState = {
   sports: availableSports,
   sportGroups: Object.fromEntries(availableSports.map(sport => [sport, []])),
   athletes: [
-    {id: "preview-student-1", name: "Avery Johnson", grade: "10", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Football"], groupBySport: {}, subgroup: "", maxes: {Bench: 185}, projectedMaxes: {Bench: 195}, overrides: {}},
+    {id: "preview-student-1", name: "Avery Johnson", grade: "10", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Track & Field"], groupBySport: {}, subgroup: "", maxes: {Bench: 185}, projectedMaxes: {Bench: 195}, overrides: {}},
     {id: "preview-student-2", name: "Maya O'Neil", grade: "11", teacher: "Coach", classGroup: "Nonfootball Group A", sports: ["Basketball"], groupBySport: {}, subgroup: "", maxes: {Bench: 125}, projectedMaxes: {Bench: 130}, overrides: {}},
     {id: "preview-student-3", name: "Jordan Smith", grade: "9", teacher: "Coach", classGroup: "Nonfootball Group B", sports: ["Baseball"], groupBySport: {}, subgroup: "", maxes: {Bench: 145}, projectedMaxes: {Bench: 155}, overrides: {}},
   ],
@@ -36,6 +37,65 @@ const previewStudents = [
   {id: 2, athleteId: "preview-student-2", athleteName: "Maya O'Neil", username: "mayaoneil", password: "oneil", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
   {id: 3, athleteId: "preview-student-3", athleteName: "Jordan Smith", username: "jordansmith", password: "smith", active: true, createdAt: new Date().toISOString(), lastLoginAt: null},
 ];
+
+function cleanCredential(value) {
+  return String(value || "").normalize("NFKD").replace(/[^\x00-\x7F]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function defaultPreviewCredentials(name) {
+  const plain = String(name || "").trim();
+  const parts = plain.includes(",")
+    ? plain.split(",", 2).reverse().flatMap(part => part.trim().split(/\s+/))
+    : plain.split(/\s+/);
+  const cleaned = parts.map(cleanCredential).filter(Boolean);
+  return {username: cleanCredential(cleaned.join("")), password: cleaned.at(-1) || "student"};
+}
+
+function syncPreviewStudents() {
+  const athleteIds = new Set(coachState.athletes.map(athlete => athlete.id));
+  for (let index = previewStudents.length - 1; index >= 0; index -= 1) {
+    if (!athleteIds.has(previewStudents[index].athleteId)) previewStudents.splice(index, 1);
+  }
+  const existingAthleteIds = new Set(previewStudents.map(account => account.athleteId));
+  const reserved = new Set(previewStudents.map(account => account.username));
+  let created = 0;
+  coachState.athletes.forEach(athlete => {
+    if (existingAthleteIds.has(athlete.id)) return;
+    const defaults = defaultPreviewCredentials(athlete.name);
+    let username = defaults.username || "student";
+    let suffix = 2;
+    while (reserved.has(username)) username = `${defaults.username || "student"}${suffix++}`;
+    reserved.add(username);
+    previewStudents.push({
+      id: Math.max(0, ...previewStudents.map(account => account.id)) + 1,
+      athleteId: athlete.id, athleteName: athlete.name, username, password: defaults.password,
+      active: true, createdAt: new Date().toISOString(), lastLoginAt: null,
+    });
+    created += 1;
+  });
+  return created;
+}
+
+function addPreviewPrescriptions(newAthleteIds) {
+  const existing = new Set(coachState.prescriptions.map(item => `${item.assignmentId}|${item.athleteId}`));
+  let created = 0;
+  coachState.athletes.filter(athlete => newAthleteIds.has(athlete.id)).forEach(athlete => {
+    coachState.assignments.filter(assignment => assignment.date >= date && assignment.group === athlete.classGroup && (assignment.sport === "all" || athlete.sports.includes(assignment.sport))).forEach(assignment => {
+      const key = `${assignment.id}|${athlete.id}`;
+      if (existing.has(key)) return;
+      const max = athlete.overrides?.[assignment.lift] || athlete.projectedMaxes?.[assignment.lift] || athlete.maxes?.[assignment.lift] || null;
+      coachState.prescriptions.push({
+        id: `preview-${crypto.randomUUID()}`, assignmentId: assignment.id, athleteId: athlete.id,
+        athleteName: athlete.name, group: assignment.group, sports: [...athlete.sports], lift: assignment.lift,
+        projectedMaxUsed: max, prescribedLoad: max ? Math.round(max * assignment.percent / 100 / 5) * 5 : null,
+        sets: assignment.sets, reps: assignment.reps, expected: assignment.expected, completedLoad: "", burnoutReps: "",
+        note: "", submitted: false, loadMismatch: false, needsReview: false, isIndividualOverride: false,
+      });
+      existing.add(key); created += 1;
+    });
+  });
+  return created;
+}
 
 function previewRosterSummary() {
   return {
@@ -66,6 +126,25 @@ function send(response, status, body, type = "text/html; charset=utf-8", headers
 }
 
 function dashboard() {
+  if (activePreviewAthleteId) {
+    const athlete = coachState.athletes.find(item => item.id === activePreviewAthleteId);
+    if (athlete) {
+      const assignmentById = new Map(coachState.assignments.map(item => [item.id, item]));
+      const items = coachState.prescriptions.filter(item => item.athleteId === athlete.id).map(item => {
+        const assignment = assignmentById.get(item.assignmentId) || {};
+        return {...item, date: assignment.date || date, percent: assignment.percent || 0, expectedReps: item.expected, locked: Boolean(assignment.locked), notes: assignment.notes || ""};
+      });
+      const actualMaxes = athlete.maxes || {};
+      const projectedMaxes = athlete.projectedMaxes || {};
+      const maxLifts = [...new Set([...liftLibrary, ...Object.keys(actualMaxes), ...Object.keys(projectedMaxes), ...items.map(item => item.lift)])];
+      return {
+        athlete: {name: athlete.name, grade: athlete.grade, classGroup: athlete.classGroup},
+        sports: {available: availableSports, selected: athlete.sports || []},
+        maxes: maxLifts.map(lift => ({lift, actual: actualMaxes[lift] ?? null, projected: projectedMaxes[lift] ?? actualMaxes[lift] ?? null})),
+        today: items.filter(item => item.date === date), history: items.filter(item => item.submitted),
+      };
+    }
+  }
   const maxLifts = [...new Set([...liftLibrary, ...Object.keys(actual), ...Object.keys(projected), ...workouts.map(item => item.lift)])];
   return {
     athlete: {name: "Student Test", grade: "Test", classGroup: "Student Test Group"},
@@ -85,6 +164,13 @@ const server = http.createServer((request, response) => {
     request.on("end", () => {
       const form = new URLSearchParams(body);
       if (form.get("username") === "student" && form.get("password") === "test") {
+        activePreviewAthleteId = null;
+        return send(response, 302, "", "text/plain", {Location: "/student"});
+      }
+      const account = previewStudents.find(item => item.active && item.username === form.get("username") && item.password === form.get("password"));
+      if (account) {
+        activePreviewAthleteId = account.athleteId;
+        account.lastLoginAt = new Date().toISOString();
         return send(response, 302, "", "text/plain", {Location: "/student"});
       }
       return send(response, 401, loginPage("The username or password is not correct."));
@@ -94,6 +180,38 @@ const server = http.createServer((request, response) => {
   if (request.method === "POST" && url.pathname === "/logout") return send(response, 302, "", "text/plain", {Location: "/"});
   if (request.method === "GET" && url.pathname === "/app") return send(response, 200, html("app.html"));
   if (request.method === "GET" && url.pathname === "/api/state") return send(response, 200, JSON.stringify(coachState), "application/json");
+  if (request.method === "PUT" && url.pathname === "/api/state") {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const payload = JSON.parse(body || "{}");
+      if (payload.revision !== coachState.revision) return send(response, 409, JSON.stringify({error: "Planner data changed on another screen.", revision: coachState.revision}), "application/json");
+      const athleteGroups = new Map((payload.athletes || []).map(athlete => [athlete.id, athlete.classGroup]));
+      const invalidAttendance = (payload.attendance || []).some(record => athleteGroups.get(record.athleteId) !== record.group);
+      if (invalidAttendance) return send(response, 400, JSON.stringify({error: "Attendance references an invalid athlete or group"}), "application/json");
+      const previousAthleteIds = new Set(coachState.athletes.map(athlete => athlete.id));
+      const nextRevision = coachState.revision + 1;
+      Object.keys(coachState).forEach(key => delete coachState[key]);
+      Object.assign(coachState, payload, {revision: nextRevision});
+      const newAthleteIds = new Set(coachState.athletes.filter(athlete => !previousAthleteIds.has(athlete.id)).map(athlete => athlete.id));
+      const prescriptionsCreated = addPreviewPrescriptions(newAthleteIds);
+      const accountsCreated = syncPreviewStudents();
+      return send(response, 200, JSON.stringify({ok: true, revision: nextRevision, accountsCreated, prescriptionsCreated}), "application/json");
+    });
+    return;
+  }
+  if (request.method === "PUT" && url.pathname === "/api/attendance") {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const payload = JSON.parse(body || "{}");
+      coachState.attendance = coachState.attendance.filter(record => !(record.date === payload.date && record.athleteId === payload.athleteId));
+      if (payload.present) coachState.attendance.push({date: payload.date, group: payload.group, athleteId: payload.athleteId, checkedAt: new Date().toISOString()});
+      coachState.revision += 1;
+      return send(response, 200, JSON.stringify({ok: true, revision: coachState.revision}), "application/json");
+    });
+    return;
+  }
   if (request.method === "POST" && url.pathname === "/api/roster-import/preview") {
     request.resume();
     request.on("end", () => send(response, 200, JSON.stringify({ok: true, summary: previewRosterSummary()}), "application/json"));
@@ -114,6 +232,14 @@ const server = http.createServer((request, response) => {
     students: previewStudents,
     update: {available: false, state: "idle", message: "Preview server"},
   }), "application/json");
+  if (request.method === "POST" && url.pathname === "/api/app-settings/students/sync") {
+    request.resume();
+    request.on("end", () => {
+      const accountsCreated = syncPreviewStudents();
+      return send(response, 200, JSON.stringify({ok: true, accountsCreated, students: previewStudents}), "application/json");
+    });
+    return;
+  }
   if (request.method === "PUT" && /^\/api\/app-settings\/students\/\d+$/.test(url.pathname)) {
     let body = "";
     request.on("data", chunk => body += chunk);

@@ -86,7 +86,12 @@ with tempfile.TemporaryDirectory() as directory:
         raise AssertionError("Stale state was accepted")
     assert database.set_attendance("2026-08-28", "Nonfootball Group A", "athlete-1", True) == 2
     assert len(database.get_state()["attendance"]) == 1
-    assert database.set_attendance("2026-08-28", "Nonfootball Group A", "athlete-1", False) == 3
+    moved_state = database.get_state()
+    moved_state["athletes"][0]["classGroup"] = "Nonfootball Group B"
+    moved_state["attendance"][0]["group"] = "Nonfootball Group B"
+    assert database.replace_state(moved_state, 2) == 3
+    assert database.get_state()["attendance"][0]["group"] == "Nonfootball Group B"
+    assert database.set_attendance("2026-08-28", "Nonfootball Group B", "athlete-1", False) == 4
     assert database.get_state()["attendance"] == []
     database.ensure_test_student("test-password-hash")
     demo_date = __import__("datetime").datetime.now().date().isoformat()
@@ -131,7 +136,7 @@ with tempfile.TemporaryDirectory() as directory:
     invalid = sample_state()
     invalid["athletes"][0]["maxes"]["Bench"] = -10
     try:
-        database.replace_state(invalid, 3)
+        database.replace_state(invalid, 4)
     except ValueError:
         pass
     else:

@@ -48,9 +48,11 @@ def _class_group(sports: list[str]) -> str:
     values = set(sports)
     if "Football" in values:
         return "Football"
-    if values.intersection({"Baseball", "Soccer"}):
+    if values.intersection({"Track", "Track & Field", "Cross Country", "Basketball"}):
         return "Nonfootball Group A"
-    return "Nonfootball Group B"
+    if values.intersection({"Baseball", "Soccer"}):
+        return "Nonfootball Group B"
+    return "Nonfootball Group A"
 
 
 def parse_master_roster(source: bytes | BinaryIO) -> dict[str, Any]:

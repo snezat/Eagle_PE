@@ -245,6 +245,97 @@ def test_revision_conflict_and_atomic_attendance(tmp_path, monkeypatch):
     assert refreshed["attendance"] == [{"date": "2026-08-28", "group": "Nonfootball Group A", "athleteId": "athlete-1", "checkedAt": refreshed["attendance"][0]["checkedAt"]}]
 
 
+def test_new_roster_athlete_gets_login_and_current_workout(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
+    monkeypatch.setenv("ARC_SECURE_COOKIES", "0")
+    app = create_app({"TESTING": True, "TRUSTED_HOSTS": ["localhost"]})
+    client = app.test_client()
+    landing = client.get("/")
+    csrf = token_from(landing.get_data(as_text=True))
+    setup_token = (tmp_path / "setup-token").read_text().strip()
+    client.post("/setup", data={
+        "csrf_token": csrf, "setup_token": setup_token, "username": "coach",
+        "password": "correct horse battery staple", "confirm_password": "correct horse battery staple",
+    })
+    coach_page = client.get("/app")
+    coach_csrf = token_from(coach_page.get_data(as_text=True))
+    workout_date = datetime.now().date().isoformat()
+    state = client.get("/api/state").get_json()
+    state.update({
+        "classGroups": ["Nonfootball Group A", "Nonfootball Group B"],
+        "sports": ["Track & Field", "Baseball"],
+        "sportGroups": {"Track & Field": [], "Baseball": []},
+        "assignments": [{
+            "id": "today-bench", "group": "Nonfootball Group A", "sport": "all",
+            "date": workout_date, "lift": "Bench", "percent": 75, "sets": 2,
+            "reps": 5, "expected": 8, "notes": "", "locked": False,
+            "priority": False, "createdAt": 1,
+        }],
+        "athletes": [{
+            "id": "new-walk-in", "name": "Taylor Runner", "grade": "10", "teacher": "Coach",
+            "classGroup": "Nonfootball Group A", "sports": ["Track & Field"],
+            "groupBySport": {}, "subgroup": "", "maxes": {"Bench": 200},
+            "projectedMaxes": {}, "overrides": {},
+        }],
+    })
+    saved = client.put("/api/state", json=state, headers={"X-CSRF-Token": coach_csrf})
+    assert saved.status_code == 200
+    assert saved.get_json()["accountsCreated"] == 1
+    assert saved.get_json()["prescriptionsCreated"] == 1
+    account = client.get("/api/app-settings").get_json()["students"][0]
+    assert account["username"] == "taylorrunner"
+    assert account["password"] == "runner"
+
+    database = app.extensions["arc_db"]
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM student_accounts WHERE athlete_id='new-walk-in'")
+    synced = client.post(
+        "/api/app-settings/students/sync", json={}, headers={"X-CSRF-Token": coach_csrf}
+    )
+    assert synced.status_code == 200
+    assert synced.get_json()["accountsCreated"] == 1
+
+    client.post("/logout", data={"csrf_token": coach_csrf})
+    login_page = client.get("/")
+    login_csrf = token_from(login_page.get_data(as_text=True))
+    login = client.post("/login", data={
+        "csrf_token": login_csrf, "username": "taylorrunner", "password": "runner",
+    })
+    assert login.status_code == 302
+    assert login.headers["Location"].endswith("/student")
+    dashboard = client.get(f"/api/student/dashboard?date={workout_date}").get_json()
+    assert dashboard["athlete"]["name"] == "Taylor Runner"
+    assert [item["lift"] for item in dashboard["today"]] == ["Bench"]
+
+
+def test_existing_sport_groups_are_aligned_without_losing_attendance(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
+    monkeypatch.setenv("ARC_SECURE_COOKIES", "0")
+    app = create_app({"TESTING": True, "TRUSTED_HOSTS": ["localhost"]})
+    database = app.extensions["arc_db"]
+    state = database.get_state()
+    state.update({
+        "classGroups": ["Nonfootball Group A", "Nonfootball Group B"],
+        "sports": ["Track & Field", "Cross Country", "Baseball", "Soccer"],
+        "sportGroups": {sport: [] for sport in ["Track & Field", "Cross Country", "Baseball", "Soccer"]},
+        "athletes": [
+            {"id": "track", "name": "Track Student", "grade": "", "teacher": "", "classGroup": "Nonfootball Group B", "sports": ["Track & Field", "Cross Country"], "groupBySport": {}, "subgroup": "", "maxes": {}, "projectedMaxes": {}, "overrides": {}},
+            {"id": "baseball", "name": "Baseball Student", "grade": "", "teacher": "", "classGroup": "Nonfootball Group A", "sports": ["Baseball", "Soccer"], "groupBySport": {}, "subgroup": "", "maxes": {}, "projectedMaxes": {}, "overrides": {}},
+        ],
+        "attendance": [
+            {"date": "2026-09-24", "group": "Nonfootball Group B", "athleteId": "track", "checkedAt": "2026-09-24T12:00:00+00:00"},
+            {"date": "2026-09-24", "group": "Nonfootball Group A", "athleteId": "baseball", "checkedAt": "2026-09-24T12:00:00+00:00"},
+        ],
+    })
+    database.replace_state(state, state["revision"])
+    assert database.align_sport_training_groups() == 2
+    aligned = database.get_state()
+    groups = {athlete["id"]: athlete["classGroup"] for athlete in aligned["athletes"]}
+    assert groups == {"track": "Nonfootball Group A", "baseball": "Nonfootball Group B"}
+    attendance = {record["athleteId"]: record["group"] for record in aligned["attendance"]}
+    assert attendance == {"track": "Nonfootball Group A", "baseball": "Nonfootball Group B"}
+
+
 def test_invalid_state_is_rejected_without_losing_data(tmp_path, monkeypatch):
     monkeypatch.setenv("ARC_INSTANCE_PATH", str(tmp_path))
     monkeypatch.setenv("ARC_SECURE_COOKIES", "0")
