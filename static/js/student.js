@@ -1,5 +1,11 @@
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const state = { dashboard: null, date: localDate() };
+const GROUP_LABELS = {
+  "Nonfootball Group A": "G:A - Track / Basketball",
+  "Nonfootball Group B": "G:B - Baseball / Soccer",
+};
+
+function groupLabel(value) { return GROUP_LABELS[value] || value; }
 
 function localDate() {
   const now = new Date();
@@ -42,7 +48,7 @@ async function loadDashboard() {
 function render() {
   const {athlete, today, maxes, history, sports} = state.dashboard;
   document.querySelector("#student-name").textContent = athlete.name;
-  document.querySelector("#student-meta").textContent = [athlete.grade && `Grade ${athlete.grade}`, athlete.classGroup].filter(Boolean).join(" · ");
+  document.querySelector("#student-meta").textContent = [athlete.grade && `Grade ${athlete.grade}`, groupLabel(athlete.classGroup)].filter(Boolean).join(" · ");
   document.querySelector("#today-label").textContent = new Intl.DateTimeFormat(undefined, {weekday: "long", month: "long", day: "numeric"}).format(new Date(`${state.date}T12:00:00`));
   const workouts = document.querySelector("#student-workouts");
   workouts.innerHTML = today.length ? today.map((item, index) => `

@@ -41,8 +41,8 @@
             <button class="btn primary" id="tv-fullscreen">Enter TV mode</button>
             <div class="segmented" aria-label="Displayed groups">
               <button class="btn active" data-tv-mode="both">Both groups</button>
-              <button class="btn" data-tv-mode="a">Group A only</button>
-              <button class="btn" data-tv-mode="b">Group B only</button>
+              <button class="btn" data-tv-mode="a">G:A - Track / Basketball</button>
+              <button class="btn" data-tv-mode="b">G:B - Baseball / Soccer</button>
             </div>
             <div class="tv-clock"><strong id="tv-time"></strong><span id="tv-day"></span></div>
           </div>
@@ -54,8 +54,8 @@
             <div><h1>Attendance board</h1><p>Tap a name to check in. Use Options to move or remove an athlete.</p></div>
             <label>Date<input id="attendance-date" type="date"></label>
             <div class="segmented attendance-groups" aria-label="Attendance group">
-              <button class="btn active" data-attendance-group="Nonfootball Group A">Group A</button>
-              <button class="btn" data-attendance-group="Nonfootball Group B">Group B</button>
+              <button class="btn active" data-attendance-group="Nonfootball Group A">G:A - Track / Basketball</button>
+              <button class="btn" data-attendance-group="Nonfootball Group B">G:B - Baseball / Soccer</button>
             </div>
             <strong class="attendance-count" id="attendance-count">0 / 0 present</strong>
           </div>
@@ -71,7 +71,7 @@
         <section data-panel="assign" hidden>
           <div class="heading"><div><h1>Assign lift module</h1><p>Assign once; calculate individual loads for the selected group.</p></div></div>
           <article class="card"><div class="form-grid">
-            <label>Class group<select id="a-group"></select></label><label>Sport filter<select id="a-sport"></select></label><label>Date<input id="a-date" type="date"></label>
+            <label>Training group<select id="a-group"></select></label><label>Sport filter<select id="a-sport"></select></label><label>Date<input id="a-date" type="date"></label>
             <label>Lift<div class="lift-picker"><input id="a-lift" autocomplete="off" placeholder="Choose or type a new lift"><button type="button" id="open-lifts" aria-label="Show all saved lifts" aria-expanded="false">▾</button><div class="lift-dropdown" id="lift-dropdown" hidden></div></div><datalist id="lifts"></datalist><button class="btn mini" id="manage-lifts" type="button">Manage lift list</button></label>
             <label>Percentage<input id="a-percent" type="number" min="1" max="100" value="75"></label><label>Sets<input id="a-sets" type="number" min="1" value="2"></label><label>Base reps<input id="a-reps" type="number" min="1" value="5"></label><label>Expected burnout reps<input id="a-expected" type="number" min="1" value="8"></label>
             <label class="wide">Notes<textarea id="a-notes" rows="2" maxlength="2000"></textarea></label><button class="btn primary" id="assign-workout">Assign to group</button>
@@ -101,15 +101,15 @@
             <div class="message" id="roster-import-message" role="status"></div>
             <div class="dialog-actions"><button class="btn" id="cancel-roster-import" type="button">Cancel</button><button class="btn primary" id="apply-roster-import" type="button">Apply roster update</button></div>
           </article>
-          <article class="card" id="athlete-form" hidden><div class="form-grid"><label>Name<input id="new-name" maxlength="200"></label><label>Grade<input id="new-grade" maxlength="20"></label><label>Teacher<input id="new-teacher" maxlength="100"></label><label>Class group<select id="new-group"></select></label><fieldset class="wide"><legend>Sports</legend><div class="checks" id="new-sports"></div></fieldset><button class="btn primary" id="save-athlete">Save athlete</button></div></article>
+          <article class="card" id="athlete-form" hidden><div class="form-grid"><label>Name<input id="new-name" maxlength="200"></label><label>Grade<input id="new-grade" maxlength="20"></label><label>Teacher<input id="new-teacher" maxlength="100"></label><label>Training group<select id="new-group"></select></label><fieldset class="wide"><legend>Sports</legend><div class="checks" id="new-sports"></div></fieldset><button class="btn primary" id="save-athlete">Save athlete & create login</button></div></article>
           <div class="cards three roster-setup">
-            <article class="card"><h2>Class groups</h2><div class="compact-add"><input id="new-class" maxlength="100" placeholder="New class group"><button class="btn" id="add-class" type="button">Add</button></div><div class="chips" id="class-options"></div></article>
+            <article class="card"><h2>Training groups</h2><div class="compact-add"><input id="new-class" maxlength="100" placeholder="New training group"><button class="btn" id="add-class" type="button">Add</button></div><div class="chips" id="class-options"></div></article>
             <article class="card"><h2>Sports</h2><div class="compact-add"><input id="new-sport" maxlength="100" placeholder="New sport"><button class="btn" id="add-sport" type="button">Add</button></div><div class="chips" id="sport-options"></div></article>
             <article class="card"><h2>Sport training groups</h2><div class="compact-add subgroup-add"><select id="sub-sport" aria-label="Sport for new training group"></select><input id="new-sub" maxlength="100" placeholder="e.g. Linemen"><button class="btn" id="add-sub" type="button">Add</button></div><div class="chips" id="sub-options"></div></article>
           </div>
-          <div class="toolbar"><label>Sport<select id="f-sport"></select></label><label>Class group<select id="f-class"></select></label><label>Sport training group<select id="f-sub"></select></label><label>Search<input id="f-search" type="search" placeholder="Athlete name"></label><button class="btn danger push" id="remove-athletes" hidden>Remove selected</button></div>
+          <div class="toolbar"><label>Sport<select id="f-sport"></select></label><label>Training group<select id="f-class"></select></label><label>Sport training group<select id="f-sub"></select></label><label>Search<input id="f-search" type="search" placeholder="Athlete name"></label><button class="btn danger push" id="remove-athletes" hidden>Remove selected</button></div>
           <div class="heading small"><h2 id="roster-title">All athletes</h2><span id="roster-count"></span></div>
-          <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Class group</th><th>Sports</th><th>Sport training groups</th><th>Actual / projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
+          <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Training group</th><th>Sports</th><th>Sport training groups</th><th>Actual / projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
         </section>
 
         <section data-panel="settings" hidden>
@@ -144,7 +144,7 @@
             <div class="message" id="settings-message" role="status"></div>
           </article>
           <article class="card users-card student-accounts-card">
-            <div class="heading small"><div><h2>Student accounts</h2><p>Accounts are created automatically from the roster. Usernames use first name + last name; initial passwords use the last name. All credentials are lowercase with spaces and special characters removed.</p></div></div>
+            <div class="heading small"><div><h2>Student accounts</h2><p>Accounts are created automatically when an athlete is saved to the roster. Usernames use first name + last name; initial passwords use the last name. All credentials are lowercase with spaces and special characters removed.</p></div><button class="btn" id="sync-student-accounts" type="button">Refresh student accounts</button></div>
             <div class="table-wrap"><table><thead><tr><th>Student</th><th>Username</th><th>Password</th><th>Status</th><th>Last sign-in</th><th>Controls</th></tr></thead><tbody id="settings-students"></tbody></table></div>
             <div class="message" id="student-accounts-message" role="status"></div>
           </article>

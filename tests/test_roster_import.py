@@ -2,7 +2,7 @@ from io import BytesIO
 
 from openpyxl import Workbook
 
-from roster_import import merge_master_roster, parse_master_roster
+from roster_import import _class_group, merge_master_roster, parse_master_roster
 
 
 HEADERS = [
@@ -42,6 +42,15 @@ def athlete(athlete_id, name, group="Nonfootball Group B", sports=None, maxes=No
         "classGroup": group, "sports": sports or [], "groupBySport": {}, "subgroup": "",
         "maxes": maxes or {}, "projectedMaxes": {"Bench": 205}, "overrides": {},
     }
+
+
+def test_sport_training_group_mapping_matches_coach_labels():
+    assert _class_group(["Track & Field"]) == "Nonfootball Group A"
+    assert _class_group(["Cross Country"]) == "Nonfootball Group A"
+    assert _class_group(["Basketball"]) == "Nonfootball Group A"
+    assert _class_group(["Baseball"]) == "Nonfootball Group B"
+    assert _class_group(["Soccer"]) == "Nonfootball Group B"
+    assert _class_group(["Baseball", "Track & Field"]) == "Nonfootball Group A"
 
 
 def test_parenthetical_name_is_merged_without_losing_existing_identity_or_data():

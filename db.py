@@ -346,6 +346,50 @@ class Database:
                 created += 1
         return created
 
+    def align_sport_training_groups(self) -> int:
+        """Keep the two nonfootball groups aligned with their displayed sport groupings."""
+        group_a_sports = {"track", "track & field", "cross country", "basketball"}
+        group_b_sports = {"baseball", "soccer"}
+        changed = 0
+        with self.transaction() as conn:
+            group_rows = conn.execute(
+                "SELECT id,name FROM class_groups WHERE name IN ('Nonfootball Group A','Nonfootball Group B')"
+            ).fetchall()
+            group_ids = {row["name"]: row["id"] for row in group_rows}
+            if len(group_ids) != 2:
+                return 0
+            athletes = conn.execute(
+                """SELECT a.id,a.class_group_id,s.name AS sport_name
+                   FROM athletes a
+                   JOIN athlete_sports ats ON ats.athlete_id=a.id
+                   JOIN sports s ON s.id=ats.sport_id
+                   WHERE a.class_group_id IN (?,?)
+                   ORDER BY a.id""",
+                (group_ids["Nonfootball Group A"], group_ids["Nonfootball Group B"]),
+            ).fetchall()
+            sports_by_athlete: dict[str, set[str]] = {}
+            current_groups: dict[str, int] = {}
+            for row in athletes:
+                sports_by_athlete.setdefault(row["id"], set()).add(row["sport_name"].casefold())
+                current_groups[row["id"]] = row["class_group_id"]
+            for athlete_id, sports in sports_by_athlete.items():
+                target_name = None
+                if sports.intersection(group_a_sports):
+                    target_name = "Nonfootball Group A"
+                elif sports.intersection(group_b_sports):
+                    target_name = "Nonfootball Group B"
+                if not target_name:
+                    continue
+                target_id = group_ids[target_name]
+                if current_groups[athlete_id] == target_id:
+                    continue
+                conn.execute("UPDATE athletes SET class_group_id=?,updated_at=? WHERE id=?", (target_id, utcnow(), athlete_id))
+                conn.execute("UPDATE attendance SET class_group_id=? WHERE athlete_id=?", (target_id, athlete_id))
+                changed += 1
+            if changed:
+                conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
+        return changed
+
     def list_student_accounts(self) -> list[dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute(

@@ -1,4 +1,5 @@
 __pycache__/
 *.py[cod]
+.pytest-run/
 instance/backups/pre-master-roster-import-*.sqlite3
 instance/backups/roster-import-verification-copy.sqlite3*
