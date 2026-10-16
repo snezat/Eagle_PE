@@ -157,21 +157,22 @@ def test_student_login_is_scoped_and_burnout_updates_projected_max(tmp_path, mon
         "/api/student/maxes", json={"maxes": {"Dumbbell Row": 103}},
         headers={"X-CSRF-Token": student_csrf},
     )
-    assert updated_maxes.status_code == 200
-    assert updated_maxes.get_json()["maxes"]["Dumbbell Row"] == 105
+    assert updated_maxes.status_code == 400
+    assert client.put(
+        "/api/student/last-weights", json={"weights": {"Dumbbell Row": 50}},
+        headers={"X-CSRF-Token": student_csrf},
+    ).status_code == 200
     dashboard = client.get(f"/api/student/dashboard?date={workout_date}").get_json()
+    assert {item["lift"] for item in dashboard["maxes"]} == {"Bench", "Back Squat", "Power Clean"}
+    assert next(item for item in dashboard["lastWeights"] if item["lift"] == "Dumbbell Row")["weight"] == 50
     row = next(item for item in dashboard["today"] if item["lift"] == "Dumbbell Row")
-    assert row["prescribedLoad"] == 65
-    assert next(item for item in dashboard["maxes"] if item["lift"] == "Dumbbell Row")["actual"] == 105
+    assert row["prescribedLoad"] is None
     coach_state = database.get_state()
     synced_athlete = next(athlete for athlete in coach_state["athletes"] if athlete["id"] == "student-test-athlete")
-    assert synced_athlete["maxes"]["Dumbbell Row"] == 105
-    synced_athlete["maxes"]["Dumbbell Row"] = 110
+    assert "Dumbbell Row" not in synced_athlete["maxes"]
     database.replace_state(coach_state, coach_state["revision"])
     dashboard = client.get(f"/api/student/dashboard?date={workout_date}").get_json()
-    row = next(item for item in dashboard["today"] if item["lift"] == "Dumbbell Row")
-    assert next(item for item in dashboard["maxes"] if item["lift"] == "Dumbbell Row")["actual"] == 110
-    assert row["prescribedLoad"] == 65
+    assert next(item for item in dashboard["lastWeights"] if item["lift"] == "Dumbbell Row")["weight"] == 50
     assert client.put(
         f"/api/student/workouts/{row['id']}", json={"burnoutReps": 12},
         headers={"X-CSRF-Token": student_csrf},

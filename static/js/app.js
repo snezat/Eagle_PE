@@ -482,7 +482,43 @@ function setupNavigation() {
     $$('[data-panel]').forEach(panel => panel.hidden = panel.dataset.panel !== button.dataset.view);
     renderAll();
     if (button.dataset.view === "settings") loadAppSettings();
+    if (button.dataset.view === "max-reports") loadMaxReports();
   }));
+}
+
+let maxReports = [];
+
+function renderMaxReports() {
+  const group = $("#max-report-group").value;
+  const block = $("#max-report-block").value.trim().toLowerCase();
+  const reports = maxReports.filter(report => (!group || report.group === group) && (!block || report.block.toLowerCase().includes(block)));
+  const query = new URLSearchParams({group, block});
+  $("#export-max-reports").href = `/api/max-reports/export?${query}`;
+  const body = $("#max-reports");
+  body.replaceChildren();
+  reports.forEach(report => {
+    const row = document.createElement("tr");
+    row.append(...[new Date(report.createdAt).toLocaleString(), report.block || "—", report.athleteName,
+      [groupLabel(report.group), report.sports.join(", ")].filter(Boolean).join(" / "),
+      report.maxes.Bench, report.maxes["Back Squat"], report.maxes["Power Clean"]].map(cell));
+    body.append(row);
+  });
+  message("max-report-message", `${reports.length} report${reports.length === 1 ? "" : "s"}. Export includes every report matching these filters, with one row per submission.`);
+}
+
+async function loadMaxReports() {
+  message("max-report-message", "Loading reports…");
+  try {
+    const response = await fetch("/api/max-reports", {headers: {Accept: "application/json"}});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not load max reports");
+    maxReports = result.reports;
+    const select = $("#max-report-group");
+    const chosen = select.value;
+    select.replaceChildren(new Option("All groups", ""), ...[...new Set(maxReports.map(report => report.group))].sort().map(group => new Option(groupLabel(group), group)));
+    if ([...select.options].some(option => option.value === chosen)) select.value = chosen;
+    renderMaxReports();
+  } catch (error) { message("max-report-message", error.message); }
 }
 
 function renderSide() {
@@ -508,30 +544,6 @@ function renderSide() {
 
 function applicableSports(group) {
   return state.sports.filter(sport => state.athletes.some(athlete => athlete.classGroup === group && athlete.sports.includes(sport)));
-}
-
-function renderDashboard() {
-  const submitted = state.prescriptions.filter(p => p.submitted).length;
-  $("#d-submitted").textContent = `${submitted}/${state.prescriptions.length}`;
-  $("#d-pending").textContent = state.suggestions.filter(s => s.status === "pending").length;
-  $("#d-missing").textContent = state.prescriptions.filter(p => !p.submitted).length;
-  $("#d-max").textContent = state.prescriptions.filter(p => !p.projectedMaxUsed).length;
-  const groups = $("#d-groups"); groups.replaceChildren();
-  state.classGroups.filter(group => group !== "Football").forEach(group => {
-    const rows = state.prescriptions.filter(p => p.group === group), done = rows.filter(p => p.submitted).length;
-    const line = document.createElement("div"); line.className = "progress";
-    const label = document.createElement("span"); label.textContent = groupLabel(group);
-    const bar = document.createElement("div"); bar.className = "bar";
-    const fill = document.createElement("span"); fill.style.width = `${rows.length ? done / rows.length * 100 : 0}%`; bar.append(fill);
-    const value = document.createElement("strong"); value.textContent = `${done}/${rows.length}`;
-    line.append(label, bar, value); groups.append(line);
-  });
-  const attention = $("#d-attention"); attention.replaceChildren();
-  [
-    ["No starting max", state.prescriptions.filter(p => !p.projectedMaxUsed).length, "bad"],
-    ["Needs coach review", state.prescriptions.filter(p => p.needsReview).length, "warn"],
-    ["Extreme burnout entry", state.suggestions.filter(s => s.extreme && s.status === "pending").length, "warn"],
-  ].forEach(([label, count, type]) => { const line = document.createElement("p"); line.append(document.createTextNode(`${label}: `), badge(count, type)); attention.append(line); });
 }
 
 function setupAssignInputs() {
@@ -639,50 +651,6 @@ function toggleLiftDropdown(force) {
   if (open) renderLiftDropdown();
   host.hidden = !open;
   $("#open-lifts").setAttribute("aria-expanded", String(open));
-}
-
-function assignmentLabel(a) { return `${a.date} · ${groupLabel(a.group)} · ${a.lift}`; }
-
-function renderResults() {
-  const assignmentSelect = $("#r-assignment"), chosen = assignmentSelect.value;
-  assignmentSelect.replaceChildren();
-  [...state.assignments].filter(a => a.group !== "Football").sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt).forEach(a => assignmentSelect.append(new Option(assignmentLabel(a), a.id)));
-  if (state.assignments.some(a => a.id === chosen)) assignmentSelect.value = chosen;
-  const assignment = state.assignments.find(a => a.id === assignmentSelect.value);
-  optionList($("#r-sport"), state.sports, "All sports", $("#r-sport").value);
-  const body = $("#results"); body.replaceChildren();
-  if (!assignment) { $("#r-summary").textContent = "Assign a lift first."; return; }
-  let rows = rowsFor(assignment.id), sport = $("#r-sport").value, status = $("#r-status").value;
-  rows = rows.filter(p => (sport === "all" || p.sports.includes(sport)) && (status === "all" || status === "missing" && !p.submitted || status === "submitted" && p.submitted || status === "review" && p.needsReview));
-  $("#r-summary").textContent = `${groupLabel(assignment.group)} · ${assignment.lift} · ${assignment.sets} × ${assignment.reps} @ ${assignment.percent}% · ${rows.filter(p => p.submitted).length}/${rows.length} shown submitted${assignment.locked ? " · LOCKED" : ""}`;
-  rows.forEach(p => {
-    const row = document.createElement("tr"); row.dataset.id = p.id;
-    const who = document.createElement("div"); const name = document.createElement("div"); name.className = "athlete-name"; name.textContent = p.athleteName; who.append(name);
-    row.append(cell(who), cell(p.sports.join(", ") || "No sport"), cell(p.projectedMaxUsed ? `${p.projectedMaxUsed} lb` : "No projected max"), cell(p.prescribedLoad ? `${p.sets} × ${p.reps} @ ${p.prescribedLoad} lb` : "Technique only"));
-    [["completedLoad", "number"], ["burnoutReps", "number"], ["note", "text"]].forEach(([field, type]) => { const input = document.createElement("input"); input.type = type; input.value = p[field] ?? ""; input.dataset.field = field; input.disabled = assignment.locked; row.append(cell(input)); });
-    row.append(cell(badge(p.needsReview ? "Needs review" : p.submitted ? "Submitted" : "Missing", p.needsReview ? "warn" : p.submitted ? "" : "bad"))); body.append(row);
-  });
-  $("#lock-session").textContent = assignment.locked ? "Unlock session" : "Lock session";
-}
-
-async function saveResults() {
-  const assignment = state.assignments.find(a => a.id === $("#r-assignment").value);
-  if (!assignment || assignment.locked) { message("r-message", "This session is locked."); return; }
-  $$("#results tr[data-id]").forEach(row => {
-    const p = state.prescriptions.find(item => item.id === row.dataset.id);
-    $$('[data-field]', row).forEach(input => p[input.dataset.field] = input.type === "number" ? (input.value === "" ? "" : Number(input.value)) : input.value);
-  });
-  rowsFor(assignment.id).forEach(p => {
-    p.submitted = Boolean(p.completedLoad !== "" && p.burnoutReps !== "");
-    p.loadMismatch = Boolean(p.submitted && p.prescribedLoad && Number(p.completedLoad) !== Number(p.prescribedLoad));
-    p.needsReview = Boolean(p.loadMismatch || Number(p.burnoutReps) > p.expected + 15);
-    if (!p.submitted) return;
-    const athlete = state.athletes.find(a => a.id === p.athleteId), oldMax = Number(athlete?.projectedMaxes?.[p.lift] || athlete?.maxes?.[p.lift] || p.projectedMaxUsed || 0), suggested = round5(Number(p.completedLoad) * (1 + Number(p.burnoutReps) / 30));
-    const existing = state.suggestions.find(s => s.prescriptionId === p.id);
-    const data = {id: existing?.id || uid(), prescriptionId: p.id, assignmentId: assignment.id, athleteId: p.athleteId, athleteName: p.athleteName, group: p.group, sports: p.sports, lift: p.lift, oldMax, burnoutReps: Number(p.burnoutReps), expected: p.expected, suggestedMax: suggested, manualMax: existing?.manualMax || suggested, extreme: Number(p.burnoutReps) > p.expected + 15, status: existing?.status || "pending"};
-    existing ? Object.assign(existing, data) : state.suggestions.push(data);
-  });
-  await saveState(); message("r-message", "Results saved. Max suggestions are ready for review."); renderAll();
 }
 
 function renderReview() {
@@ -1028,18 +996,19 @@ function renderAttendance() {
 }
 
 function renderAll() {
-  renderSide(); renderDashboard(); setupAssignInputs(); renderAssignments(); renderLiftManager(); renderResults(); renderReview(); renderRosterSetup(); renderRoster(); renderNewAthleteSports(); renderToday(); renderAttendance(); updateClock();
+  renderSide(); setupAssignInputs(); renderAssignments(); renderLiftManager(); renderReview(); renderRosterSetup(); renderRoster(); renderNewAthleteSports(); renderToday(); renderAttendance(); updateClock();
 }
 
 function bindEvents() {
   setupNavigation();
-  $("#refresh").addEventListener("click", renderAll); $("#a-group").addEventListener("change", refreshAssignSports); $("#assign-workout").addEventListener("click", assignWorkout);
+  $("#refresh-max-reports").addEventListener("click", loadMaxReports);
+  $("#max-report-group").addEventListener("change", renderMaxReports);
+  $("#max-report-block").addEventListener("input", renderMaxReports);
+  $("#a-group").addEventListener("change", refreshAssignSports); $("#assign-workout").addEventListener("click", assignWorkout);
   $("#manage-lifts").addEventListener("click", () => $("#lift-manager").hidden = !$("#lift-manager").hidden); $("#close-lifts").addEventListener("click", () => $("#lift-manager").hidden = true);
   $("#open-lifts").addEventListener("click", event => { event.stopPropagation(); toggleLiftDropdown(); });
   $("#a-lift").addEventListener("keydown", event => { if (event.key === "ArrowDown" && $("#lift-dropdown").hidden) { event.preventDefault(); toggleLiftDropdown(true); } if (event.key === "Escape") toggleLiftDropdown(false); });
   document.addEventListener("click", event => { if (!event.target.closest(".lift-picker")) toggleLiftDropdown(false); });
-  ["#r-assignment", "#r-sport", "#r-status"].forEach(id => $(id).addEventListener("change", renderResults)); $("#save-results").addEventListener("click", saveResults);
-  $("#lock-session").addEventListener("click", async () => { const a = state.assignments.find(x => x.id === $("#r-assignment").value); if (a) { a.locked = !a.locked; await saveState(); renderAll(); } });
   ["#v-group", "#v-sport", "#v-lift", "#v-status"].forEach(id => $(id).addEventListener("change", renderReview));
   $("#approve-visible").addEventListener("click", async () => { const visible = renderReview().filter(s => s.status === "pending"); visible.forEach(s => { const input = $(`[data-manual="${CSS.escape(s.id)}"]`); s.manualMax = Number(input?.value || s.suggestedMax); s.status = "approved"; const athlete = state.athletes.find(a => a.id === s.athleteId); if (athlete) { athlete.projectedMaxes ||= {}; athlete.projectedMaxes[s.lift] = s.manualMax; } }); await saveState(); renderAll(); });
   $("#add-athlete").addEventListener("click", () => $("#athlete-form").hidden = !$("#athlete-form").hidden); $("#save-athlete").addEventListener("click", addAthlete);

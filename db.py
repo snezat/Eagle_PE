@@ -159,6 +159,18 @@ CREATE TABLE IF NOT EXISTS suggestions (
   status TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status, assignment_id);
+-- These records survive whole-planner roster replacement. Reports keep encrypted
+-- snapshots so later edits or roster removal cannot rewrite a completed block.
+CREATE TABLE IF NOT EXISTS student_max_reports (
+  id TEXT PRIMARY KEY,
+  athlete_id TEXT NOT NULL,
+  snapshot_enc BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS student_last_weights (
+  athlete_id TEXT PRIMARY KEY,
+  weights_enc BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS app_settings (
   setting_key TEXT PRIMARY KEY,
   value_enc BLOB NOT NULL,
@@ -189,6 +201,22 @@ INSERT OR IGNORE INTO state_meta(id,revision) VALUES(1,0);
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+MAIN_LIFTS = ("Bench", "Back Squat", "Power Clean")
+
+
+def main_lift(value: str) -> str | None:
+    if not isinstance(value, str):
+        return None
+    key = "".join(value.casefold().split())
+    return {"bench": "Bench", "benchpress": "Bench", "squat": "Back Squat",
+            "backsquat": "Back Squat", "powerclean": "Power Clean"}.get(key)
+
+
+def main_lift_value(values: dict, lift: str):
+    return values.get(lift, next((value for key, value in values.items()
+                                 if main_lift(key) == main_lift(lift)), None))
 
 
 class StateConflictError(RuntimeError):
@@ -545,6 +573,9 @@ class Database:
                 configured_lifts = ["Bench", "Back Squat", "Power Clean"]
             known_lifts = set(actual) | set(projected) | {item["lift"] for item in items}
             lifts = list(dict.fromkeys([*configured_lifts, *sorted(known_lifts - set(configured_lifts))]))
+            weights_row = conn.execute("SELECT weights_enc FROM student_last_weights WHERE athlete_id=?", (athlete_id,)).fetchone()
+            weights = json.loads(self.cipher.decrypt(weights_row["weights_enc"])) if weights_row else {}
+            max_lifts = [next((lift for lift in [*actual, *projected, *lifts] if main_lift(lift) == primary), primary) for primary in MAIN_LIFTS]
             return {
                 "athlete": {
                     "name": self.cipher.decrypt(athlete["name_enc"]),
@@ -552,7 +583,9 @@ class Database:
                     "classGroup": athlete["group_name"] or "",
                 },
                 "sports": {"available": available_sports, "selected": selected_sports},
-                "maxes": [{"lift": lift, "actual": actual.get(lift), "projected": projected.get(lift, actual.get(lift))} for lift in lifts],
+                "maxes": [{"lift": lift, "actual": main_lift_value(actual, lift),
+                           "projected": main_lift_value(projected, lift) or main_lift_value(actual, lift)} for lift in max_lifts],
+                "lastWeights": [{"lift": lift, "weight": weights.get(lift)} for lift in dict.fromkeys([*lifts, *weights]) if not main_lift(lift)],
                 "today": [item for item in items if item["date"] == workout_date],
                 "history": [item for item in items if item["submitted"]][:50],
             }
@@ -567,55 +600,132 @@ class Database:
             lift = raw_lift.strip()
             if not lift or len(lift) > 200 or lift != raw_lift:
                 raise ValueError("Each lift must have a valid name")
+            if not main_lift(lift):
+                raise ValueError("Recorded maxes are only available for Bench, Squat, and Power Clean")
             if value is None or value == "":
                 updates[lift] = None
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"Enter a valid recorded max for {lift}")
-            if value <= 0 or value > 5000:
+            if value < 1 or value > 5000:
                 raise ValueError(f"Recorded max for {lift} must be between 1 and 5,000 lb")
-            updates[lift] = math.floor(float(value) / 5 + 0.5) * 5
+            updates[lift] = float(value)
 
         now = utcnow()
         with self.transaction() as conn:
+            return self._save_student_maxes(conn, athlete_id, updates, now)
+
+    def _save_student_maxes(self, conn: sqlite3.Connection, athlete_id: str,
+                            updates: dict[str, float | None], now: str) -> dict[str, float]:
+        athlete = conn.execute(
+            "SELECT maxes_enc,projected_maxes_enc,overrides_enc FROM athletes WHERE id=?",
+            (athlete_id,),
+        ).fetchone()
+        if not athlete:
+            raise ValueError("Student account is not linked to an athlete")
+        actual = json.loads(self.cipher.decrypt(athlete["maxes_enc"]) or "{}")
+        projected = json.loads(self.cipher.decrypt(athlete["projected_maxes_enc"]) or "{}") if athlete["projected_maxes_enc"] else {}
+        overrides = json.loads(self.cipher.decrypt(athlete["overrides_enc"]) or "{}")
+        updates = {next((key for key in [*actual, *projected] if main_lift(key) == main_lift(lift)), lift): value
+                   for lift, value in updates.items()}
+        for lift, value in updates.items():
+            if value is None:
+                actual.pop(lift, None)
+            else:
+                actual[lift] = value
+        conn.execute(
+            "UPDATE athletes SET maxes_enc=?,updated_at=? WHERE id=?",
+            (self.cipher.encrypt(json.dumps(actual, separators=(",", ":"))), now, athlete_id),
+        )
+
+        if updates:
+            rows = conn.execute(
+                """SELECT p.id,p.lift_enc,a.percent FROM prescriptions p
+                   JOIN assignments a ON a.id=p.assignment_id
+                   WHERE p.athlete_id=? AND p.submitted=0 AND p.is_override=0""",
+                (athlete_id,),
+            ).fetchall()
+            for row in rows:
+                lift = self.cipher.decrypt(row["lift_enc"])
+                update_lift = next((key for key in updates if main_lift(key) == main_lift(lift)), None)
+                if update_lift is None:
+                    continue
+                max_value = main_lift_value(overrides, lift) or main_lift_value(projected, lift) or actual.get(update_lift)
+                load = math.floor(float(max_value) * row["percent"] / 100 / 5 + 0.5) * 5 if max_value else None
+                conn.execute(
+                    "UPDATE prescriptions SET projected_max=?,prescribed_load=? WHERE id=?",
+                    (max_value, load, row["id"]),
+                )
+            conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
+        return actual
+
+    def report_student_maxes(self, athlete_id: str, report_id: str, block: str, maxes: dict) -> dict:
+        try:
+            if not isinstance(report_id, str) or str(uuid.UUID(report_id)) != report_id:
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise ValueError("A valid report ID is required") from None
+        if not isinstance(block, str) or len(block.strip()) > 100:
+            raise ValueError("Block label must be 100 characters or fewer")
+        if not isinstance(maxes, dict) or len(maxes) != 3 or {main_lift(lift) for lift in maxes} != set(MAIN_LIFTS):
+            raise ValueError("Report a max for Bench, Squat, and Power Clean")
+        for lift, value in maxes.items():
+            if not lift or lift != lift.strip() or len(lift) > 200:
+                raise ValueError("Each lift must have a valid name")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 1 <= value <= 5000:
+                raise ValueError(f"Recorded max for {lift} must be between 1 and 5,000 lb")
+        now = utcnow()
+        with self.transaction() as conn:
+            existing = conn.execute("SELECT * FROM student_max_reports WHERE id=?", (report_id,)).fetchone()
+            if existing:
+                if existing["athlete_id"] != athlete_id:
+                    raise ValueError("Report ID is already in use")
+                previous = json.loads(self.cipher.decrypt(existing["snapshot_enc"]))
+                if previous["block"] != block.strip() or previous["maxes"] != {main_lift(lift): value for lift, value in maxes.items()}:
+                    raise ValueError("This report ID was already used for different maxes")
+                return {"id": report_id, "createdAt": existing["created_at"]}
             athlete = conn.execute(
-                "SELECT maxes_enc,projected_maxes_enc,overrides_enc FROM athletes WHERE id=?",
+                "SELECT a.name_enc,g.name AS group_name FROM athletes a LEFT JOIN class_groups g ON g.id=a.class_group_id WHERE a.id=?",
                 (athlete_id,),
             ).fetchone()
             if not athlete:
                 raise ValueError("Student account is not linked to an athlete")
-            actual = json.loads(self.cipher.decrypt(athlete["maxes_enc"]) or "{}")
-            projected = json.loads(self.cipher.decrypt(athlete["projected_maxes_enc"]) or "{}") if athlete["projected_maxes_enc"] else {}
-            overrides = json.loads(self.cipher.decrypt(athlete["overrides_enc"]) or "{}")
-            for lift, value in updates.items():
-                if value is None:
-                    actual.pop(lift, None)
-                else:
-                    actual[lift] = value
-            conn.execute(
-                "UPDATE athletes SET maxes_enc=?,updated_at=? WHERE id=?",
-                (self.cipher.encrypt(json.dumps(actual, separators=(",", ":"))), now, athlete_id),
-            )
+            sports = [row["name"] for row in conn.execute(
+                "SELECT s.name FROM athlete_sports a JOIN sports s ON s.id=a.sport_id WHERE a.athlete_id=? ORDER BY s.sort_order,s.name", (athlete_id,)
+            )]
+            snapshot = {"athleteName": self.cipher.decrypt(athlete["name_enc"]), "group": athlete["group_name"] or "",
+                        "sports": sports, "block": block.strip(), "maxes": {main_lift(lift): value for lift, value in maxes.items()}}
+            self._save_student_maxes(conn, athlete_id, maxes, now)
+            conn.execute("INSERT INTO student_max_reports(id,athlete_id,snapshot_enc,created_at) VALUES(?,?,?,?)",
+                         (report_id, athlete_id, self.cipher.encrypt(json.dumps(snapshot)), now))
+            return {"id": report_id, "createdAt": now}
 
-            if updates:
-                rows = conn.execute(
-                    """SELECT p.id,p.lift_enc,a.percent FROM prescriptions p
-                       JOIN assignments a ON a.id=p.assignment_id
-                       WHERE p.athlete_id=? AND p.submitted=0 AND p.is_override=0""",
-                    (athlete_id,),
-                ).fetchall()
-                for row in rows:
-                    lift = self.cipher.decrypt(row["lift_enc"])
-                    if lift not in updates:
-                        continue
-                    max_value = overrides.get(lift) or projected.get(lift) or actual.get(lift)
-                    load = math.floor(float(max_value) * row["percent"] / 100 / 5 + 0.5) * 5 if max_value else None
-                    conn.execute(
-                        "UPDATE prescriptions SET projected_max=?,prescribed_load=? WHERE id=?",
-                        (max_value, load, row["id"]),
-                    )
-                conn.execute("UPDATE state_meta SET revision=revision+1 WHERE id=1")
-            return actual
+    def get_max_reports(self) -> list[dict]:
+        with self.connection() as conn:
+            return [{"id": row["id"], "athleteId": row["athlete_id"], "createdAt": row["created_at"],
+                     **json.loads(self.cipher.decrypt(row["snapshot_enc"]))}
+                    for row in conn.execute("SELECT * FROM student_max_reports ORDER BY created_at DESC,id")]
+
+    def set_student_last_weights(self, athlete_id: str, weights: dict) -> None:
+        if not isinstance(weights, dict) or len(weights) > 200:
+            raise ValueError("Last weights must be an object")
+        for lift, value in weights.items():
+            if not isinstance(lift, str) or not lift.strip() or lift != lift.strip() or len(lift) > 200 or main_lift(lift):
+                raise ValueError("Last weight used is only available for other lifts")
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 5000):
+                raise ValueError(f"Last weight for {lift} must be between 0 and 5,000 lb")
+        with self.transaction() as conn:
+            if not conn.execute("SELECT id FROM athletes WHERE id=?", (athlete_id,)).fetchone():
+                raise ValueError("Student account is not linked to an athlete")
+            row = conn.execute("SELECT weights_enc FROM student_last_weights WHERE athlete_id=?", (athlete_id,)).fetchone()
+            saved = json.loads(self.cipher.decrypt(row["weights_enc"])) if row else {}
+            for lift, value in weights.items():
+                if value is None:
+                    saved.pop(lift, None)
+                else:
+                    saved[lift] = value
+            conn.execute("INSERT INTO student_last_weights(athlete_id,weights_enc) VALUES(?,?) ON CONFLICT(athlete_id) DO UPDATE SET weights_enc=excluded.weights_enc",
+                         (athlete_id, self.cipher.encrypt(json.dumps(saved))))
 
     def set_student_sports(self, athlete_id: str, sports: list[str], effective_date: str) -> list[str]:
         if not isinstance(sports, list) or len(sports) > 100 or any(not isinstance(name, str) for name in sports):
@@ -703,8 +813,7 @@ class Database:
             if row["locked"]:
                 raise ValueError("This workout is locked")
             lift = self.cipher.decrypt(row["lift_enc"])
-            normalized = " ".join(lift.casefold().replace("press", "").split())
-            if not any(name in normalized for name in ("bench", "squat", "power clean")):
+            if not main_lift(lift):
                 raise ValueError("Burnout logging is only available for Bench, Squat, and Power Clean")
             load = row["prescribed_load"]
             if load is None or load <= 0:

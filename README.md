@@ -27,7 +27,11 @@ The account opens the mobile student portal at `/student`. Its home screen is po
 
 Every rostered athlete receives a student account automatically. The default username is the athlete's first and last name joined together, and the default password is the last name. Both are lowercase with spaces, accents, apostrophes, and other special characters removed. Duplicate usernames receive a numeric suffix. Coaches can view, edit, lock, and unlock these credentials from **App Settings → Student accounts**; editing credentials signs out any existing sessions for that student.
 
-Students can enter or correct recorded maxes from their **Maxes** tab. Student and coach edits update the same athlete record, and changed maxes recalculate affected unsubmitted prescriptions.
+Students save burnout reps for each main lift independently, including zero reps, and can return to finish other lifts later. Locked workouts remain read-only.
+
+The student **Profile** shows recorded and projected maxes only for Bench, Squat, and Power Clean. Recorded max edits update the coach's athlete record and recalculate affected unsubmitted prescriptions. Other lifts have a separate **Last weight used** section; these notes do not change maxes, projections, or prescribed loads. Existing accessory max data is preserved for coach planning but is no longer displayed as a student max.
+
+When instructed by the coach after any training block, students enter their three recorded maxes, optionally add the coach's block name, and click **Report new max**. This saves their profile maxes and sends a dated snapshot to the coach's **Max reports** page. Reports are created only by this explicit action; blocks have no automatic schedule. Coaches can filter by training group or block name and choose **Export CSV** for an Excel-compatible file with one row per submission, student name and ID, block, timestamp, sports, and the three maxes in pounds. Reports preserve submitted values through subsequent max edits, roster saves, and roster removal. Retrying the same submission does not duplicate it.
 
 Changing a sport on the student profile asks the student whether to submit immediately. Once submitted, the same sports record used by the coach is updated and that day's sport-specific workout is refreshed.
 
