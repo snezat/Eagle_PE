@@ -9,6 +9,9 @@ const today = new Date();
 const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 const actual = {Bench: 200, "Back Squat": 300, "Power Clean": 185};
 const projected = {...actual};
+const mainLift = lift => ({bench: "Bench", benchpress: "Bench", squat: "Back Squat", backsquat: "Back Squat", powerclean: "Power Clean"})[String(lift).toLowerCase().replace(/\s/g, "")];
+const maxReports = [];
+const lastWeights = {};
 const liftLibrary = ["Bench", "Back Squat", "Power Clean", "Deadlift"];
 const availableSports = ["Football", "Basketball", "Baseball", "Soccer", "Track & Cross"];
 let selectedSports = ["Football"];
@@ -140,7 +143,8 @@ function dashboard() {
       return {
         athlete: {name: athlete.name, grade: athlete.grade, classGroup: athlete.classGroup},
         sports: {available: availableSports, selected: athlete.sports || []},
-        maxes: maxLifts.map(lift => ({lift, actual: actualMaxes[lift] ?? null, projected: projectedMaxes[lift] ?? actualMaxes[lift] ?? null})),
+        maxes: maxLifts.filter(mainLift).map(lift => ({lift, actual: actualMaxes[lift] ?? null, projected: projectedMaxes[lift] ?? actualMaxes[lift] ?? null})),
+        lastWeights: maxLifts.filter(lift => !mainLift(lift)).map(lift => ({lift, weight: lastWeights[athlete.id]?.[lift] ?? null})),
         today: items.filter(item => item.date === date), history: items.filter(item => item.submitted),
       };
     }
@@ -149,7 +153,8 @@ function dashboard() {
   return {
     athlete: {name: "Student Test", grade: "Test", classGroup: "Student Test Group"},
     sports: {available: availableSports, selected: selectedSports},
-    maxes: maxLifts.map(lift => ({lift, actual: actual[lift] ?? null, projected: projected[lift] ?? actual[lift] ?? null})),
+    maxes: maxLifts.filter(mainLift).map(lift => ({lift, actual: actual[lift] ?? null, projected: projected[lift] ?? actual[lift] ?? null})),
+    lastWeights: maxLifts.filter(lift => !mainLift(lift)).map(lift => ({lift, weight: lastWeights.test?.[lift] ?? null})),
     today: workouts,
     history: workouts.filter(item => item.submitted),
   };
@@ -266,6 +271,39 @@ const server = http.createServer((request, response) => {
   }
   if (request.method === "GET" && url.pathname === "/student") return send(response, 200, html("student.html"));
   if (request.method === "GET" && url.pathname === "/api/student/dashboard") return send(response, 200, JSON.stringify(dashboard()), "application/json");
+  if (request.method === "GET" && url.pathname.startsWith("/api/max-reports")) {
+    const reports = maxReports.filter(report => (!url.searchParams.get("group") || report.group === url.searchParams.get("group")) && (!url.searchParams.get("block") || report.block.toLowerCase().includes(url.searchParams.get("block").toLowerCase())));
+    if (url.pathname === "/api/max-reports/export") {
+      const csv = value => `"${String(value).replace(/"/g, '""')}"`;
+      const rows = [["Report ID", "Reported at (UTC)", "Block", "Athlete ID", "Student", "Training group", "Sports", "Bench (lb)", "Squat (lb)", "Power Clean (lb)"], ...reports.map(report => [report.id, report.createdAt, report.block, report.athleteId, report.athleteName, report.group, report.sports.join(", "), report.maxes.Bench, report.maxes["Back Squat"], report.maxes["Power Clean"]])];
+      response.setHeader("Content-Disposition", 'attachment; filename="student-max-reports.csv"');
+      return send(response, 200, "\ufeff" + rows.map(row => row.map(csv).join(",")).join("\r\n"), "text/csv");
+    }
+    return send(response, 200, JSON.stringify({reports}), "application/json");
+  }
+  if ((request.method === "POST" && url.pathname === "/api/student/max-reports") || (request.method === "PUT" && url.pathname === "/api/student/last-weights")) {
+    let body = "";
+    request.on("data", chunk => body += chunk);
+    request.on("end", () => {
+      const payload = JSON.parse(body || "{}");
+      const athleteId = activePreviewAthleteId || "test";
+      if (url.pathname.endsWith("last-weights")) {
+        lastWeights[athleteId] = {...lastWeights[athleteId], ...payload.weights};
+        return send(response, 200, JSON.stringify({ok: true}), "application/json");
+      }
+      const existing = maxReports.find(report => report.id === payload.id);
+      if (existing) return send(response, 200, JSON.stringify({ok: true, id: existing.id, createdAt: existing.createdAt}), "application/json");
+      if (!payload.maxes || Object.keys(payload.maxes).length !== 3 || Object.entries(payload.maxes).some(([lift, value]) => !mainLift(lift) || !Number.isFinite(value) || value < 1 || value > 5000)) return send(response, 400, JSON.stringify({error: "Enter all three maxes."}), "application/json");
+      const profile = dashboard();
+      const report = {id: payload.id, athleteId, athleteName: profile.athlete.name, group: profile.athlete.classGroup, sports: [...profile.sports.selected], block: payload.block || "", createdAt: new Date().toISOString(), maxes: Object.fromEntries(Object.entries(payload.maxes).map(([lift, value]) => [mainLift(lift), value]))};
+      maxReports.unshift(report);
+      const athlete = coachState.athletes.find(item => item.id === athleteId);
+      Object.assign(athlete ? (athlete.maxes ||= {}) : actual, payload.maxes);
+      coachState.revision += 1;
+      return send(response, 200, JSON.stringify({ok: true, id: report.id, createdAt: report.createdAt}), "application/json");
+    });
+    return;
+  }
   if (request.method === "PUT" && url.pathname === "/api/student/maxes") {
     let body = "";
     request.on("data", chunk => body += chunk);
@@ -273,9 +311,10 @@ const server = http.createServer((request, response) => {
       const updates = JSON.parse(body || "{}").maxes;
       if (!updates || typeof updates !== "object" || Array.isArray(updates)) return send(response, 400, JSON.stringify({error: "A maxes object is required"}), "application/json");
       for (const [lift, value] of Object.entries(updates)) {
+        if (!mainLift(lift)) return send(response, 400, JSON.stringify({error: "Maxes are only available for the three main lifts."}), "application/json");
         if (value == null || value === "") delete actual[lift];
         else if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 5000) return send(response, 400, JSON.stringify({error: `Enter a valid recorded max for ${lift}`}), "application/json");
-        else actual[lift] = Math.round(value / 5) * 5;
+        else actual[lift] = value;
       }
       coachState.athletes[0].maxes = {...actual};
       coachState.revision += 1;

@@ -25,9 +25,8 @@
           <button data-view="today" aria-selected="true">Today’s workout</button>
           <button data-view="attendance">Attendance</button>
           <button data-view="assign">Assign lift</button>
-          <button data-view="results">Log results</button>
+          <button data-view="max-reports">Max reports</button>
           <button data-view="roster">Roster & groups</button>
-          <button data-view="dashboard">Dashboard</button>
           <button data-view="settings">App Settings</button>
         </nav>
         <div class="aside-title">Athletic PE organization</div>
@@ -63,12 +62,6 @@
           <div class="attendance-grid" id="attendance-grid"></div>
         </section>
 
-        <section data-panel="dashboard" hidden>
-          <div class="heading"><div><h1>Coach dashboard</h1><p>Completion, missing data, and max decisions across Athletic PE.</p></div><button class="btn" id="refresh">Refresh</button></div>
-          <div class="stats"><article><span>Submitted results</span><strong id="d-submitted">0/0</strong></article><article><span>Pending suggestions</span><strong id="d-pending">0</strong></article><article><span>Missing results</span><strong id="d-missing">0</strong></article><article><span>Missing starting maxes</span><strong id="d-max">0</strong></article></div>
-          <div class="cards two"><article class="card"><h2>Group completion</h2><div id="d-groups"></div></article><article class="card"><h2>Needs attention</h2><div id="d-attention"></div></article></div>
-        </section>
-
         <section data-panel="assign" hidden>
           <div class="heading"><div><h1>Assign lift module</h1><p>Assign once; calculate individual loads for the selected group.</p></div></div>
           <article class="card"><div class="form-grid">
@@ -79,12 +72,6 @@
           </div><div class="message" id="a-message"></div></article>
           <article class="card lift-manager" id="lift-manager" hidden><div class="heading small"><div><h2>Saved lifts</h2><p>Removing an option does not delete past workouts.</p></div><button class="btn" id="close-lifts">Done</button></div><div class="chips" id="lift-options"></div></article>
           <article class="card"><h2>Recent assignments</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Module</th><th>Athletes</th><th>Status</th><th>Actions</th></tr></thead><tbody id="assignments"></tbody></table></div></article>
-        </section>
-
-        <section data-panel="results" hidden>
-          <div class="heading"><div><h1>Athlete lift logging</h1><p>Log completed load and burnout reps.</p></div><button class="btn" id="lock-session">Lock session</button></div>
-          <div class="toolbar"><label>Assignment<select id="r-assignment"></select></label><label>Sport<select id="r-sport"></select></label><label>Status<select id="r-status"><option value="all">All statuses</option><option value="missing">Missing</option><option value="submitted">Submitted</option><option value="review">Needs review</option></select></label><button class="btn primary push" id="save-results">Save results</button></div>
-          <div class="notice" id="r-summary"></div><div class="table-wrap"><table><thead><tr><th>Athlete</th><th>Sports</th><th>Projected max</th><th>Prescription</th><th>Completed load</th><th>Burnout reps</th><th>Note</th><th>Status</th></tr></thead><tbody id="results"></tbody></table></div><div class="message" id="r-message"></div>
         </section>
 
         <section data-panel="review" hidden>
@@ -111,6 +98,13 @@
           <div class="toolbar"><label>Sport<select id="f-sport"></select></label><label>Training group<select id="f-class"></select></label><label>Sport training group<select id="f-sub"></select></label><label>Search<input id="f-search" type="search" placeholder="Athlete name"></label><button class="btn danger push" id="remove-athletes" hidden>Remove selected</button></div>
           <div class="heading small"><h2 id="roster-title">All athletes</h2><span id="roster-count"></span></div>
           <div class="table-wrap"><table><thead><tr><th class="select-column" hidden><input type="checkbox" id="select-all" aria-label="Select all visible athletes"></th><th>Athlete</th><th>Training group</th><th>Sports</th><th>Sport training groups</th><th>Actual / projected maxes</th></tr></thead><tbody id="roster"></tbody></table></div><div class="message" id="f-message"></div>
+        </section>
+
+        <section data-panel="max-reports" hidden>
+          <div class="heading"><div><h1>Student max reports</h1><p>Students report Bench, Squat, and Power Clean when you ask at the end of a block. Each report preserves the values submitted at that time.</p></div><button class="btn" id="refresh-max-reports" type="button">Refresh reports</button></div>
+          <div class="toolbar"><label>Training group<select id="max-report-group"><option value="">All groups</option></select></label><label>Block name<input id="max-report-block" type="search" placeholder="Filter by block name"></label><a class="btn primary" id="export-max-reports" href="/api/max-reports/export">Export CSV</a></div>
+          <p id="max-report-message" role="status"></p>
+          <div class="table-wrap"><table><thead><tr><th>Reported</th><th>Block</th><th>Student</th><th>Training group / sports</th><th>Bench (lb)</th><th>Squat (lb)</th><th>Power Clean (lb)</th></tr></thead><tbody id="max-reports"></tbody></table></div>
         </section>
 
         <section data-panel="settings" hidden>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import logging
 import math
@@ -15,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, abort, current_app, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, current_app, g, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -400,6 +402,60 @@ def create_app(test_config: dict | None = None) -> Flask:
             return jsonify({"error": str(exc)}), 400
         db.audit("student_sports_updated", None, client_hash(), f"student:{g.student['id']} sports:{','.join(selected)}")
         return jsonify({"ok": True, "sports": selected})
+
+    @app.post("/api/student/max-reports")
+    @student_required
+    def student_report_maxes():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON body is required"}), 400
+        try:
+            result = db.report_student_maxes(g.student["athlete_id"], payload.get("id"), payload.get("block", ""), payload.get("maxes"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        db.audit("student_maxes_reported", None, client_hash(), f"student:{g.student['id']} report:{result['id']}")
+        return jsonify({"ok": True, **result})
+
+    @app.put("/api/student/last-weights")
+    @student_required
+    def student_update_last_weights():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON body is required"}), 400
+        try:
+            db.set_student_last_weights(g.student["athlete_id"], payload.get("weights"))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        db.audit("student_last_weights_updated", None, client_hash(), f"student:{g.student['id']}")
+        return jsonify({"ok": True})
+
+    def filtered_max_reports():
+        group = request.args.get("group", "")
+        block = request.args.get("block", "").strip().casefold()
+        return [report for report in db.get_max_reports()
+                if (not group or report["group"] == group) and (not block or block in report["block"].casefold())]
+
+    @app.get("/api/max-reports")
+    @login_required
+    def coach_max_reports():
+        return jsonify({"reports": filtered_max_reports()})
+
+    @app.get("/api/max-reports/export")
+    @login_required
+    def export_max_reports():
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(["Report ID", "Reported at (UTC)", "Block", "Athlete ID", "Student", "Training group", "Sports", "Bench (lb)", "Squat (lb)", "Power Clean (lb)"])
+        def spreadsheet_text(value):
+            text = str(value)
+            return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")) else text
+        for report in filtered_max_reports():
+            writer.writerow([spreadsheet_text(value) for value in [report["id"], report["createdAt"], report["block"],
+                report["athleteId"], report["athleteName"], report["group"], ", ".join(report["sports"]),
+                report["maxes"]["Bench"], report["maxes"]["Back Squat"], report["maxes"]["Power Clean"]]])
+        return Response("\ufeff" + output.getvalue(), mimetype="text/csv", headers={
+            "Content-Disposition": 'attachment; filename="student-max-reports.csv"',
+        })
 
     @app.get("/app")
     @login_required

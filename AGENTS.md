@@ -110,6 +110,7 @@ If a requested change conflicts with one of these guarantees, stop and surface t
 - Run incoming planner state through the existing validation path before persistence. Invalid references or malformed values must fail without partially replacing valid state.
 - Create a database backup before a destructive roster merge. Roster matching must prefer deterministic identity preservation; ambiguity is an error, not permission to guess.
 - Student and coach max changes operate on the same athlete record. Keep prescriptions, projections, submissions, and history internally consistent when changing those workflows.
+- Student block max reports are created only by explicit submission for Bench, Squat, and Power Clean. Preserve their encrypted, dated snapshots independently of whole-planner replacement and later athlete edits/removal. Accessory last-used weights remain separate from maxes, projections, and prescribed loads.
 - Canonicalize sport names through `sport_names.py`; do not scatter new alias handling across views or SQL.
 
 ## Flask/API conventions

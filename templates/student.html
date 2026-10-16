@@ -34,12 +34,8 @@
     <section class="student-view" data-student-view="log" hidden>
       <button class="student-back" type="button" data-open-view="today">← Today’s workout</button>
       <span class="student-kicker">Final set</span><h1>Log burnout reps</h1>
-      <p class="student-intro">Enter the total reps you completed—not the difference from the target.</p>
-      <form id="student-log-form">
-        <div class="student-log-list" id="student-log-list"></div>
-        <div class="student-form-message" id="student-form-message" role="status"></div>
-        <button class="student-primary-action" id="save-lifts" type="submit">Save results</button>
-      </form>
+      <p class="student-intro">Enter the total reps you completed from your final set. Save each lift whenever you finish it; you can return for the others later.</p>
+      <div class="student-log-list" id="student-log-list"></div>
       <section class="student-result" id="student-result" hidden aria-live="polite">
         <span class="student-kicker">Updated</span><h2>New projected maxes</h2><div id="student-result-list"></div>
         <button class="student-secondary-action" type="button" data-open-view="maxes">Compare maxes</button>
@@ -48,12 +44,22 @@
 
     <section class="student-view" data-student-view="maxes" hidden>
       <button class="student-back" type="button" data-open-view="today">← Today’s workout</button>
-      <span class="student-kicker">Progress</span><h1>Actual vs. projected</h1>
-      <p class="student-intro">Enter your recorded max attempts here. Changes sync with your coach; projected maxes update from your burnout sets.</p>
+      <span class="student-kicker">Your profile</span><h1>Main lift maxes</h1>
+      <p class="student-intro">Track recorded max attempts for Bench, Squat, and Power Clean. Projected maxes are estimates from burnout sets.</p>
       <form id="student-max-form">
         <div class="student-max-list" id="student-max-list"></div>
         <div class="student-form-message" id="student-max-message" role="status"></div>
         <button class="student-primary-action" type="submit">Save recorded maxes</button>
+        <div class="student-profile-card"><h2>Report new max</h2><p>When your coach asks at the end of a block, enter your new recorded maxes above, then report all three. Your coach receives a dated report to export. Saving maxes or logging reps does not create a report.</p>
+          <label>Block name (optional)<input id="student-report-block" maxlength="100" placeholder="Use the block name your coach provides"></label>
+          <button class="student-secondary-action" id="report-maxes" type="button">Report new max</button>
+        </div>
+      </form>
+      <form class="student-profile-card" id="student-last-weight-form">
+        <div><h2>Other lifts · last weight used</h2><p>Remember your previous working weight here. These weights are separate from your maxes and block reports.</p></div>
+        <div id="student-last-weight-list"></div>
+        <div class="student-form-message" id="student-weight-message" role="status"></div>
+        <button class="student-secondary-action" type="submit">Save last weights</button>
       </form>
       <form class="student-profile-card" id="student-sports-form">
         <div><span class="student-kicker">Student profile</span><h2>Your sports</h2><p>This list syncs directly from the sports configured in the coach dashboard. Check every sport you participate in so its assignments reach you.</p></div>
@@ -73,7 +79,7 @@
 
   <nav class="student-nav" aria-label="Student navigation">
     <button type="button" data-open-view="today" class="active"><span>⌂</span>Today</button>
-    <button type="button" data-open-view="maxes"><span>↗</span>Maxes</button>
+    <button type="button" data-open-view="maxes"><span>↗</span>Profile</button>
     <button type="button" data-open-view="history"><span>≡</span>History</button>
   </nav>
   <script src="{{ url_for('static', filename='js/student.js') }}" defer></script>

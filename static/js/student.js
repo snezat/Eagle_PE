@@ -1,5 +1,5 @@
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
-const state = { dashboard: null, date: localDate() };
+const state = { dashboard: null, date: localDate(), repDrafts: {}, maxDrafts: {}, weightDrafts: {}, reportKey: null, reportId: null };
 const GROUP_LABELS = {
   "Nonfootball Group A": "G:A - Track & Cross / Basketball",
   "Nonfootball Group B": "G:B - Baseball / Soccer",
@@ -35,7 +35,16 @@ function escapeHtml(value) {
 
 function tracksBurnout(lift) {
   const normalized = String(lift || "").trim().toLowerCase().replace(/\s+/g, " ");
-  return normalized.includes("bench") || normalized.includes("squat") || normalized.includes("power clean");
+  return ["bench", "benchpress", "squat", "backsquat", "powerclean"].includes(normalized.replace(/\s/g, ""));
+}
+
+function newReportId() {
+  // getRandomValues also works on the trusted-LAN HTTP deployment.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 async function loadDashboard() {
@@ -58,23 +67,23 @@ function render() {
       <div class="student-workout-status">${tracksBurnout(item.lift) && item.submitted ? `${item.burnoutReps} reps ✓` : `${item.percent}%`}</div>
     </article>`).join("") : '<div class="student-empty"><strong>No lifts assigned today</strong><span>Your coach’s assignments will appear here.</span></div>';
   const burnoutLifts = today.filter(item => tracksBurnout(item.lift));
-  const editableBurnoutLifts = burnoutLifts.filter(item => !item.locked);
   const allBurnoutSubmitted = burnoutLifts.length > 0 && burnoutLifts.every(item => item.submitted);
   const openLog = document.querySelector("#open-log");
   openLog.hidden = burnoutLifts.length === 0;
   openLog.textContent = burnoutLifts.every(item => item.locked) ? "View lift results" : allBurnoutSubmitted ? "Review or edit lift results" : burnoutLifts.some(item => item.submitted) ? "Finish logging lifts" : "Log today’s lifts";
   document.querySelector("#student-log-list").innerHTML = burnoutLifts.map(item => `
-    <label class="student-log-card">
-      <span><strong>${escapeHtml(item.lift)}</strong><small>${pounds(item.prescribedLoad)} · target ${item.expectedReps} reps</small></span>
-      <span class="student-reps-input"><input name="${escapeHtml(item.id)}" type="number" min="0" max="100" inputmode="numeric" ${item.locked ? "disabled" : "required"} value="${item.burnoutReps ?? ""}" aria-label="Total burnout reps for ${escapeHtml(item.lift)}"><em>reps</em></span>
-    </label>`).join("") || '<div class="student-empty">No lifts to log today.</div>';
-  const saveLifts = document.querySelector("#save-lifts");
-  saveLifts.hidden = editableBurnoutLifts.length === 0;
-  saveLifts.textContent = allBurnoutSubmitted ? "Update results" : "Save results";
+    <form class="student-log-card" data-log-id="${escapeHtml(item.id)}">
+      <label><strong>${escapeHtml(item.lift)}</strong><small>${pounds(item.prescribedLoad)} · target ${item.expectedReps} reps</small>
+        <span class="student-reps-input"><input name="burnoutReps" type="number" min="0" max="100" step="1" inputmode="numeric" ${item.locked ? "disabled" : "required"} value="${escapeHtml(state.repDrafts[item.id] ?? item.burnoutReps ?? "")}" aria-label="Total burnout reps for ${escapeHtml(item.lift)}"><em>reps</em></span>
+      </label>
+      <div class="student-lift-actions"><button class="student-secondary-action" type="submit" ${item.locked ? "disabled" : ""}>${item.locked ? "Locked" : item.submitted ? "Update lift" : "Save lift"}</button><span role="status">${item.submitted ? "Saved ✓" : ""}</span></div>
+    </form>`).join("") || '<div class="student-empty">No lifts to log today.</div>';
   document.querySelector("#student-max-list").innerHTML = maxes.map(item => {
     const delta = item.actual != null && item.projected != null ? item.projected - item.actual : null;
-    return `<article class="student-max-card"><label><span>${escapeHtml(item.lift)}</span><small>Recorded max</small><span class="student-max-field"><input data-max-lift="${escapeHtml(item.lift)}" type="number" min="1" max="5000" step="1" inputmode="numeric" value="${item.actual ?? ""}" placeholder="Enter max" aria-label="Recorded max for ${escapeHtml(item.lift)}"><em>lb</em></span></label><div class="student-max-arrow">→</div><div><span>Projected</span><small>${delta == null ? "Awaiting result" : `${delta >= 0 ? "+" : ""}${delta} lb`}</small><strong>${pounds(item.projected)}</strong></div></article>`;
+    return `<article class="student-max-card"><label><span>${escapeHtml(item.lift)}</span><small>Recorded max</small><span class="student-max-field"><input data-max-lift="${escapeHtml(item.lift)}" type="number" min="1" max="5000" step="1" inputmode="numeric" value="${state.maxDrafts[item.lift] ?? item.actual ?? ""}" placeholder="Enter max" aria-label="Recorded max for ${escapeHtml(item.lift)}"><em>lb</em></span></label><div class="student-max-arrow">→</div><div><span>Projected</span><small>${delta == null ? "Awaiting result" : `${delta >= 0 ? "+" : ""}${delta} lb`}</small><strong>${pounds(item.projected)}</strong></div></article>`;
   }).join("") || '<div class="student-empty">No maxes recorded yet.</div>';
+  document.querySelector("#student-last-weight-list").innerHTML = (state.dashboard.lastWeights || []).map(item => `
+    <label class="student-weight-row"><span>${escapeHtml(item.lift)}</span><span class="student-max-field"><input data-weight-lift="${escapeHtml(item.lift)}" type="number" min="0" max="5000" step="0.5" inputmode="decimal" value="${state.weightDrafts[item.lift] ?? item.weight ?? ""}" placeholder="Weight" aria-label="Last weight used for ${escapeHtml(item.lift)}"><em>lb</em></span></label>`).join("") || '<p>No other lifts in your profile yet.</p>';
   document.querySelector("#student-sport-options").innerHTML = sports.available.length ? sports.available.map(sport => `
     <label><input type="checkbox" name="sports" value="${escapeHtml(sport)}" ${sports.selected.includes(sport) ? "checked" : ""}><span>${escapeHtml(sport)}</span></label>`).join("") : '<p class="student-empty-sports">No sports have been created by the coach yet.</p>';
   document.querySelector("#student-history").innerHTML = history.map(item => {
@@ -90,13 +99,16 @@ function render() {
   }).join("") || '<div class="student-empty">Your completed lifts will appear here.</div>';
 }
 
-function openView(name) {
+async function openView(name) {
+  state.desiredView = name;
+  if (name === "maxes" && state.dashboard) {
+    try { await loadDashboard(); }
+    catch (error) { document.querySelector("#student-max-message").textContent = error.message; }
+    if (state.desiredView !== name) return;
+  }
   document.querySelectorAll("[data-student-view]").forEach(view => { view.hidden = view.dataset.studentView !== name; });
   document.querySelectorAll(".student-nav button").forEach(button => button.classList.toggle("active", button.dataset.openView === name));
   window.scrollTo({top: 0, behavior: "smooth"});
-  if (name === "maxes" && state.dashboard) {
-    loadDashboard().catch(error => { document.querySelector("#student-sports-message").textContent = error.message; });
-  }
 }
 
 document.addEventListener("click", event => {
@@ -106,34 +118,38 @@ document.addEventListener("click", event => {
 document.querySelector("#open-log").addEventListener("click", () => openView("log"));
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && state.dashboard) loadDashboard().catch(() => {});
+  if (document.visibilityState === "visible" && state.dashboard && !document.querySelector('[data-student-view="log"]:not([hidden]), [data-student-view="maxes"]:not([hidden])')) loadDashboard().catch(() => {});
 });
 
-document.querySelector("#student-log-form").addEventListener("submit", async event => {
+document.querySelector("#student-log-list").addEventListener("input", event => {
+  const form = event.target.closest("[data-log-id]");
+  if (form) state.repDrafts[form.dataset.logId] = event.target.value;
+});
+
+document.querySelector("#student-log-list").addEventListener("submit", async event => {
   event.preventDefault();
-  const form = event.currentTarget;
-  const message = document.querySelector("#student-form-message");
-  const pending = state.dashboard.today.filter(item => tracksBurnout(item.lift) && !item.locked);
+  const form = event.target;
+  const id = form.dataset.logId;
+  if (!id || !form.reportValidity()) return;
+  const button = form.querySelector("button");
+  const message = form.querySelector('[role="status"]');
+  const input = form.elements.burnoutReps;
   message.textContent = "Saving…";
+  button.disabled = true;
+  input.disabled = true;
   try {
-    const results = [];
-    for (const item of pending) {
-      const value = Number(form.elements[item.id].value);
-      const response = await fetch(`/api/student/workouts/${encodeURIComponent(item.id)}`, {
-        method: "PUT", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
-        body: JSON.stringify({burnoutReps: value}),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || `Could not save ${item.lift}`);
-      results.push(result);
-    }
-    document.querySelector("#student-result-list").innerHTML = results.map(result => `<div><span>${escapeHtml(result.lift)}</span><strong>${pounds(result.projectedMax)}</strong></div>`).join("");
+    const response = await fetch(`/api/student/workouts/${encodeURIComponent(id)}`, {
+      method: "PUT", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
+      body: JSON.stringify({burnoutReps: Number(input.value)}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not save this lift");
+    delete state.repDrafts[id];
+    document.querySelector("#student-result-list").innerHTML = `<div><span>${escapeHtml(result.lift)}</span><strong>${pounds(result.projectedMax)}</strong></div>`;
     document.querySelector("#student-result").hidden = false;
-    message.textContent = "Results saved.";
     await loadDashboard();
-  } catch (error) {
-    message.textContent = error.message;
-  }
+  } catch (error) { message.textContent = error.message; }
+  finally { button.disabled = false; input.disabled = false; }
 });
 
 document.querySelector("#student-max-form").addEventListener("submit", async event => {
@@ -145,6 +161,8 @@ document.querySelector("#student-max-form").addEventListener("submit", async eve
   form.querySelectorAll("[data-max-lift]").forEach(input => {
     maxes[input.dataset.maxLift] = input.value === "" ? null : Number(input.value);
   });
+  const buttons = [...form.querySelectorAll("button, input")];
+  buttons.forEach(button => button.disabled = true);
   message.textContent = "Saving…";
   try {
     const response = await fetch("/api/student/maxes", {
@@ -153,11 +171,71 @@ document.querySelector("#student-max-form").addEventListener("submit", async eve
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not save your recorded maxes");
+    state.maxDrafts = {};
     await loadDashboard();
     document.querySelector("#student-max-message").textContent = "Recorded maxes saved and synced with your coach.";
   } catch (error) {
     message.textContent = error.message;
+  } finally { buttons.forEach(button => button.disabled = false); }
+});
+
+document.querySelector("#report-maxes").addEventListener("click", async () => {
+  const form = document.querySelector("#student-max-form");
+  const message = document.querySelector("#student-max-message");
+  if (!form.reportValidity()) return;
+  const inputs = [...form.querySelectorAll("[data-max-lift]")];
+  if (inputs.some(input => input.value === "")) {
+    message.textContent = "Enter all three maxes before reporting to your coach.";
+    inputs.find(input => input.value === "").focus();
+    return;
   }
+  const payload = {maxes: Object.fromEntries(inputs.map(input => [input.dataset.maxLift, Number(input.value)])), block: document.querySelector("#student-report-block").value.trim()};
+  const key = JSON.stringify(payload);
+  if (state.reportKey !== key) { state.reportKey = key; state.reportId = newReportId(); }
+  const buttons = [...form.querySelectorAll("button, input")];
+  buttons.forEach(button => button.disabled = true);
+  message.textContent = "Reporting to your coach…";
+  try {
+    const response = await fetch("/api/student/max-reports", {
+      method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"},
+      body: JSON.stringify({...payload, id: state.reportId}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not report your maxes");
+    state.maxDrafts = {};
+    await loadDashboard();
+    message.textContent = "All three maxes reported to your coach and saved to your profile.";
+    message.scrollIntoView({block: "center", behavior: "smooth"});
+  } catch (error) { message.textContent = error.message; }
+  finally { buttons.forEach(button => button.disabled = false); }
+});
+
+document.querySelector("#student-last-weight-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (!form.reportValidity()) return;
+  const message = document.querySelector("#student-weight-message");
+  const button = form.querySelector("button");
+  button.disabled = true;
+  message.textContent = "Saving…";
+  const weights = Object.fromEntries([...form.querySelectorAll("[data-weight-lift]")].map(input => [input.dataset.weightLift, input.value === "" ? null : Number(input.value)]));
+  try {
+    const response = await fetch("/api/student/last-weights", {
+      method: "PUT", headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf, Accept: "application/json"}, body: JSON.stringify({weights}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not save last weights");
+    state.weightDrafts = {};
+    await loadDashboard();
+    message.textContent = "Last weights saved.";
+  } catch (error) { message.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+
+document.addEventListener("input", event => {
+  const input = event.target;
+  if (input.matches("[data-max-lift]")) state.maxDrafts[input.dataset.maxLift] = input.value;
+  if (input.matches("[data-weight-lift]")) state.weightDrafts[input.dataset.weightLift] = input.value;
 });
 
 const sportsForm = document.querySelector("#student-sports-form");
